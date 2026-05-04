@@ -9739,7 +9739,6 @@ static void disas_fp_int_conv(DisasContext* s, uint32_t insn)
  */
 static void disas_data_proc_simd(DisasContext* s, uint32_t insn);
 static void disas_simd_scalar_two_reg_misc(DisasContext* s, uint32_t insn);
-static void disas_simd_two_reg_misc(DisasContext* s, uint32_t insn);
 
 static void disas_data_proc_fp(DisasContext* s, uint32_t insn)
 {
@@ -13368,7 +13367,6 @@ static void disas_simd_scalar_three_reg_same_extra(DisasContext* s,
     uint32_t insn)
 {
     int u = extract32(insn, 29, 1);
-    int size = extract32(insn, 22, 2);
     int opcode = extract32(insn, 12, 5);
     int rm = extract32(insn, 16, 5);
     int rn = extract32(insn, 5, 5);
@@ -18497,7 +18495,6 @@ static void disas_simd_three_reg_same_extra(DisasContext* s, uint32_t insn)
             bool is270 = (opcode == 0x1e);
             if (size != 3) {
                 /* FCADD: complex add with rotation. Use per-element extraction for simplicity. */
-                int lanes = is_q ? (size == 0 ? 4 : 2) : (size == 0 ? 2 : 1);
                 int esize = (size == 0) ? 1 : 3; /* 0→f32(word), else→f64(dword) */
                 if (esize == 1) {                /* f32 */
                     IR2_OPND vn_e = ra_alloc_ftemp(), vn_o = ra_alloc_ftemp();
