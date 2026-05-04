@@ -9,6 +9,7 @@ IR2_INST *la_mov64(IR2_OPND dest, IR2_OPND src);
 IR2_INST *la_mov32_sx(IR2_OPND dest, IR2_OPND src);
 IR2_INST *la_mov32_zx(IR2_OPND dest, IR2_OPND src);
 IR2_INST *la_clr_h32(IR2_OPND dest, IR2_OPND src);
+IR2_INST *la_sext_w_d(IR2_OPND dest, IR2_OPND src);
 IR2_INST *la_add(IR2_OPND op0, IR2_OPND op1, IR2_OPND op2);
 IR2_INST *la_sub(IR2_OPND op0, IR2_OPND op1, IR2_OPND op2);
 IR2_INST *la_addi_addrx(IR2_OPND op0, IR2_OPND op1, int imm);

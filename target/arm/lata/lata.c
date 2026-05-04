@@ -356,9 +356,11 @@ static void generate_context_switch_bt_to_native(void)
         }
     }
 
-    /* Initialize scalar mask register */
-    la_vldi(fsmask_ir2_opnd, 0x190f);
-    la_vextl_qu_du(fsmask_ir2_opnd, fsmask_ir2_opnd);
+    /* Initialize scalar mask register: keep the low 64-bit scalar payload,
+     * including the sign bit of s/h values, and clear the high 64 bits. */
+    la_vxor_v(fsmask_ir2_opnd, fsmask_ir2_opnd, fsmask_ir2_opnd);
+    li_d(t0_ir2_opnd, UINT64_MAX);
+    la_vinsgr2vr_d(fsmask_ir2_opnd, t0_ir2_opnd, 0);
 
     /* jmp to tb */
     la_jirl(zero_ir2_opnd, a0_ir2_opnd, 0);

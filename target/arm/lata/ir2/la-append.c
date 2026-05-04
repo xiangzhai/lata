@@ -53,6 +53,10 @@ IR2_INST *la_clr_h32(IR2_OPND dest, IR2_OPND src) {
     return la_bstrpick_d(dest, src, 31, 0);
 }
 
+IR2_INST *la_sext_w_d(IR2_OPND dest, IR2_OPND src) {
+    return la_addi_w(dest, src, 0);
+}
+
 IR2_INST *la_add(IR2_OPND op0, IR2_OPND op1, IR2_OPND op2) {
 #ifndef TARGET_X86_64
     return la_add_w(op0, op1, op2);
