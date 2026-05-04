@@ -79,6 +79,7 @@ int option_fam_jmp_cache = 1;
 #else
 int option_fam_jmp_cache = 0;
 #endif
+int option_fp_precise = 1; /* default: precise FP exception/DN simulation enabled */
 #endif
 
 static bool opt_one_insn_per_tb;
@@ -472,6 +473,11 @@ static void handle_arg_indirect_jmp_opt_profile(const char *arg)
 {
     indirect_jmp_opt_profile = 1;
 }
+
+static void handle_arg_fp_precise(const char *arg)
+{
+    option_fp_precise = atoi(arg);
+}
 #endif
 
 struct qemu_argument {
@@ -531,6 +537,8 @@ static const struct qemu_argument arg_table[] = {
 #ifdef CONFIG_LATA
     {"indirect_jmp_opt_profile", "QEMU_INDIRECT_JMP_OPT_PROFILE",  false, handle_arg_indirect_jmp_opt_profile,
      "",           "run in indirect_jmp_opt_profile mode"},
+    {"fp_precise", "QEMU_FP_PRECISE",  true,  handle_arg_fp_precise,
+     "1",          "enable precise FP exception/DN/FTZ simulation (1=on, 0=off, default: 1)"},
 #endif
 #ifdef CONFIG_PLUGIN
     {"plugin",     "QEMU_PLUGIN",      true,  handle_arg_plugin,

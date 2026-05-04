@@ -173,5 +173,6 @@ extern int option_fam_jmp_cache;
 #ifdef CONFIG_LATA_INDIRECT_JMP
 extern int indirect_jmp_opt_profile;
 #endif
+extern int option_fp_precise;
 #endif
 #endif /* CPU_COMMON_H */

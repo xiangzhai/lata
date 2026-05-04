@@ -155,7 +155,7 @@ static abi_long do_prctl_reset_keys(CPUArchState *env, abi_long arg2)
 }
 #define do_prctl_reset_keys do_prctl_reset_keys
 
-static abi_long do_prctl_set_tagged_addr_ctrl(CPUArchState *env, abi_long arg2)
+static abi_long __attribute__((unused)) do_prctl_set_tagged_addr_ctrl(CPUArchState *env, abi_long arg2)
 {
     abi_ulong valid_mask = PR_TAGGED_ADDR_ENABLE;
     ARMCPU *cpu = env_archcpu(env);
@@ -200,7 +200,7 @@ static abi_long do_prctl_set_tagged_addr_ctrl(CPUArchState *env, abi_long arg2)
 }
 #define do_prctl_set_tagged_addr_ctrl do_prctl_set_tagged_addr_ctrl
 
-static abi_long do_prctl_get_tagged_addr_ctrl(CPUArchState *env)
+static abi_long __attribute__((unused)) do_prctl_get_tagged_addr_ctrl(CPUArchState *env)
 {
     ARMCPU *cpu = env_archcpu(env);
     abi_long ret = 0;
