@@ -9952,51 +9952,86 @@ static void disas_simd_across_lanes(DisasContext* s, uint32_t insn)
             break;
         case 0xc: /* FMAXNMV, FMINNMV */
         case 0xf: /* FMAXV, FMINV */
-            is_min = extract32(size, 1, 1);
-            if (!is_u && dc_isar_feature(aa64_fp16, s)) {
-                size = 1;
-                lata_unallocated_encoding(s);
-                return; /* FP16 not supported */
-            } else if (!is_u || extract32(size, 0, 1)) {
+            /* For float across-lanes: size=0 (f32 max), size=2 (f32 min),
+             * size=3 (f64). is_min from insn bit 16 distinguishes max/min
+             * for f64 where size does not encode the operation type. */
+            if (!is_u) {
                 lata_unallocated_encoding(s);
                 return;
-            } else {
-                size = 2;
             }
+            if (size != 2 && size != 3 && size != 0) {
+                lata_unallocated_encoding(s);
+                return;
+            }
+            if (size == 0 || size == 2) {
+                /* f32: size bit 1 distinguishes max(0)/min(1) */
+                is_min = extract32(size, 1, 1);
+                size = 2; /* process as f32 */
+            }
+            /* For f64 (size==3): is_min from insn bit 16 is already correct */
             if (opcode == 0xf) {
-                /* FMAXV/FMINV: reduce across vector (scalar form: is_q=false=2 lanes) */
-                int lanes = is_q ? 4 : 2;
+                /* FMAXV/FMINV: regular max/min (NaN-propagating) */
+                int lanes = is_q ? (size == 3 ? 2 : 4) : (size == 3 ? 1 : 2);
                 la_vori_b(vtemp2, vreg_n, 0);
-                if (size == 3) { /* f64: 2 doubleword lanes */
+                if (size == 3) { /* f64 */
                     la_vreplvei_d(vreg_d, vreg_n, 0);
-                    for (i = 1; i < 2; ++i) {
+                    IR2_OPND nan_res = ra_alloc_ftemp();
+                    IR2_OPND nan_tmp = ra_alloc_ftemp();
+                    for (i = 1; i < (is_q ? 2 : 1); ++i) {
                         la_vreplvei_d(vtemp, vtemp2, i);
-                        if (is_min)
-                            la_fmin_d(vreg_d, vreg_d, vtemp);
-                        else
+                        if (is_min) {
+                            la_fcmp_cond_d(fcc0_ir2_opnd, vreg_d, vtemp, FCMP_COND_CUN);
+                            la_fmin_d(nan_res, vreg_d, vtemp);
+                            la_fadd_d(nan_tmp, vreg_d, vtemp);
+                            la_fsel(vreg_d, nan_res, nan_tmp, fcc0_ir2_opnd);
+                        } else {
                             la_fmax_d(vreg_d, vreg_d, vtemp);
+                        }
                     }
+                    free_alloc_fpr(nan_res);
+                    free_alloc_fpr(nan_tmp);
                 } else { /* f32 */
                     la_vreplvei_w(vreg_d, vreg_n, 0);
+                    IR2_OPND nan_res = ra_alloc_ftemp();
+                    IR2_OPND nan_tmp = ra_alloc_ftemp();
                     for (i = 1; i < lanes; ++i) {
                         la_vreplvei_w(vtemp, vtemp2, i);
-                        if (is_min)
-                            la_fmin_s(vreg_d, vreg_d, vtemp);
-                        else
+                        if (is_min) {
+                            la_fcmp_cond_s(fcc0_ir2_opnd, vreg_d, vtemp, FCMP_COND_CUN);
+                            la_fmin_s(nan_res, vreg_d, vtemp);
+                            la_fadd_s(nan_tmp, vreg_d, vtemp);
+                            la_fsel(vreg_d, nan_res, nan_tmp, fcc0_ir2_opnd);
+                        } else {
                             la_fmax_s(vreg_d, vreg_d, vtemp);
+                        }
                     }
+                    free_alloc_fpr(nan_res);
+                    free_alloc_fpr(nan_tmp);
                 }
                 la_vand_v(vreg_d, vreg_d, fsmask_ir2_opnd);
             } else {
-                /* case 0xc: FMAXNMV/FMINNMV */
+                /* case 0xc/0x1c: FMAXNMV/FMINNMV */
                 la_vori_b(vtemp2, vreg_n, 0);
-                la_vreplvei_w(vreg_d, vreg_n, 0);
-                for (i = 1; i < (is_q ? 4 : 2); ++i) {
-                    la_vreplvei_w(vtemp, vtemp2, i);
-                    if (is_min)
-                        la_fmin_s(vreg_d, vreg_d, vtemp);
-                    else
-                        la_fmax_s(vreg_d, vreg_d, vtemp);
+                if (size == 3) { /* f64 */
+                    la_vreplvei_d(vreg_d, vreg_n, 0);
+                    for (i = 1; i < (is_q ? 2 : 1); ++i) {
+                        la_vreplvei_d(vtemp, vtemp2, i);
+                        if (is_min)
+                            la_fmin_d(vtemp, vreg_d, vtemp);
+                        else
+                            la_fmax_d(vtemp, vreg_d, vtemp);
+                        la_vori_b(vreg_d, vtemp, 0);
+                    }
+                } else { /* f32 */
+                    la_vreplvei_w(vreg_d, vreg_n, 0);
+                    for (i = 1; i < (is_q ? 4 : 2); ++i) {
+                        la_vreplvei_w(vtemp, vtemp2, i);
+                        if (is_min)
+                            la_fmin_s(vtemp, vreg_d, vtemp);
+                        else
+                            la_fmax_s(vtemp, vreg_d, vtemp);
+                        la_vori_b(vreg_d, vtemp, 0);
+                    }
                 }
                 la_vand_v(vreg_d, vreg_d, fsmask_ir2_opnd);
             }
@@ -10659,7 +10694,7 @@ static void disas_simd_scalar_pairwise(DisasContext* s, uint32_t insn)
                 la_vadd_d(vreg_d, vtemp, vreg_n);
                 break;
             case 0xc: /* FMAXNMP */
-                la_vfmaxa_d(vreg_d, vreg_n, vtemp);
+                la_vfmax_d(vreg_d, vreg_n, vtemp);
                 break;
             case 0xd: /* FADDP */
                 la_vfadd_d(vreg_d, vtemp, vreg_n);
@@ -10668,10 +10703,17 @@ static void disas_simd_scalar_pairwise(DisasContext* s, uint32_t insn)
                 la_vfmax_d(vreg_d, vreg_n, vtemp);
                 break;
             case 0x2c: /* FMINNMP */
-                la_vfmina_d(vreg_d, vreg_n, vtemp);
-                break;
-            case 0x2f: /* FMINP */
                 la_vfmin_d(vreg_d, vreg_n, vtemp);
+                break;
+            case 0x2f: /* FMINP — NaN-propagating */
+                {
+                    IR2_OPND nan_tmp = ra_alloc_ftemp();
+                    la_fcmp_cond_d(fcc0_ir2_opnd, vreg_n, vtemp, FCMP_COND_CUN);
+                    la_fmin_d(nan_tmp, vreg_n, vtemp);
+                    la_fadd_d(vreg_d, vreg_n, vtemp);
+                    la_fsel(vreg_d, nan_tmp, vreg_d, fcc0_ir2_opnd);
+                    free_alloc_fpr(nan_tmp);
+                }
                 break;
             default:
                 g_assert_not_reached();
@@ -10699,7 +10741,7 @@ static void disas_simd_scalar_pairwise(DisasContext* s, uint32_t insn)
 
             switch (opcode) {
                 case 0xc: /* FMAXNMP */
-                    la_vfmaxa_s(vreg_d, vreg_n, vtemp);
+                    la_vfmax_s(vreg_d, vreg_n, vtemp);
                     break;
                 case 0xd: /* FADDP */
                     la_vfadd_s(vreg_d, vtemp, vreg_n);
@@ -10708,10 +10750,17 @@ static void disas_simd_scalar_pairwise(DisasContext* s, uint32_t insn)
                     la_vfmax_s(vreg_d, vreg_n, vtemp);
                     break;
                 case 0x2c: /* FMINNMP */
-                    la_vfmina_s(vreg_d, vreg_n, vtemp);
-                    break;
-                case 0x2f: /* FMINP */
                     la_vfmin_s(vreg_d, vreg_n, vtemp);
+                    break;
+                case 0x2f: /* FMINP — NaN-propagating */
+                    {
+                        IR2_OPND nan_tmp = ra_alloc_ftemp();
+                        la_fcmp_cond_s(fcc0_ir2_opnd, vreg_n, vtemp, FCMP_COND_CUN);
+                        la_fmin_s(nan_tmp, vreg_n, vtemp);
+                        la_fadd_s(vreg_d, vreg_n, vtemp);
+                        la_fsel(vreg_d, nan_tmp, vreg_d, fcc0_ir2_opnd);
+                        free_alloc_fpr(nan_tmp);
+                    }
                     break;
                 default:
                     g_assert_not_reached();
@@ -11972,17 +12021,16 @@ static void handle_3same_float(DisasContext* s, int size, int elements,
                 la_vfcmp_cond_d(vreg_d, vreg_m, vreg_n, FCMP_COND_SLE);
                 break;
             case 0x5d: /* FACGE: |a| >= |b| */
-            {          /* Clear sign bits via AND with mask to compute vector absolute value */
+            {          /* Mask sign bits for element-wise abs, then compare */
                 IR2_OPND _mask = ra_alloc_ftemp(), _igpr = ra_alloc_itemp();
                 li_d(_igpr, 0x7FFFFFFFFFFFFFFFULL);
                 la_vreplgr2vr_d(_mask, _igpr);
-                la_vand_v(vtemp, vreg_n, _mask);
-                la_vand_v(vreg_d, vreg_m, _mask);
+                la_vand_v(vtemp, vreg_n, _mask);    /* |vn| */
+                la_vand_v(vtemp1, vreg_m, _mask);   /* |vm| */
                 free_alloc_fpr(_mask);
                 free_alloc_gpr(_igpr);
-            }
-                la_vfcmp_cond_d(vreg_d, vreg_d, vtemp, FCMP_COND_CLE);
-                break;
+                la_vfcmp_cond_d(vreg_d, vtemp1, vtemp, FCMP_COND_CLE);
+            } break;
             case 0x5f: /* FDIV */
                 la_vfdiv_d(vreg_d, vreg_n, vreg_m);
                 break;
@@ -11997,16 +12045,16 @@ static void handle_3same_float(DisasContext* s, int size, int elements,
                 la_vfcmp_cond_d(vreg_d, vreg_m, vreg_n, FCMP_COND_SLT);
                 break;
             case 0x7d: /* FACGT: |a| > |b| */
-            {          /* Clear sign bits via AND with mask for vector absolute value */
+            {          /* Mask sign bits for element-wise abs, then compare */
                 IR2_OPND _mask = ra_alloc_ftemp(), _igpr = ra_alloc_itemp();
                 li_d(_igpr, 0x7FFFFFFFFFFFFFFFULL);
                 la_vreplgr2vr_d(_mask, _igpr);
-                la_vand_v(vtemp, vreg_n, _mask);
-                la_vand_v(vreg_d, vreg_m, _mask);
+                la_vand_v(vtemp, vreg_n, _mask);    /* |vn| */
+                la_vand_v(vtemp1, vreg_m, _mask);   /* |vm| */
                 free_alloc_fpr(_mask);
                 free_alloc_gpr(_igpr);
-            }
-                la_vfcmp_cond_d(vreg_d, vreg_d, vtemp, FCMP_COND_CLT);
+                la_vfcmp_cond_d(vreg_d, vtemp1, vtemp, FCMP_COND_CLT);
+            } break;
                 break;
             default:
                 g_assert_not_reached();
@@ -12090,9 +12138,20 @@ static void handle_3same_float(DisasContext* s, int size, int elements,
                 la_vfcmp_cond_s(vreg_d, vreg_m, vreg_n, FCMP_COND_SLE);
                 break;
             case 0x5d: /* FACGE */
-                la_fabs_s(vtemp, vreg_n);
-                la_fabs_s(vtemp1, vreg_m);
-                la_vfcmp_cond_s(vreg_d, vtemp1, vtemp, FCMP_COND_SLE);
+                /* Copy sources first to avoid aliasing issues */
+                la_vori_b(vtemp2, vreg_n, 0);
+                la_vori_b(vtemp3, vreg_m, 0);
+                for (int i = 0; i < elements; ++i) {
+                    la_vreplvei_w(vtemp, vtemp2, i);
+                    la_fabs_s(vtemp, vtemp);
+                    la_vextrins_w(vreg_d, vtemp, i << 4);
+                }
+                for (int i = 0; i < elements; ++i) {
+                    la_vreplvei_w(vtemp1, vtemp3, i);
+                    la_fabs_s(vtemp1, vtemp1);
+                    la_vextrins_w(vtemp, vtemp1, i << 4);
+                }
+                la_vfcmp_cond_s(vreg_d, vtemp, vreg_d, FCMP_COND_CLE);
                 break;
             case 0x5f: /* FDIV */
                 la_vfdiv_s(vreg_d, vreg_n, vreg_m);
@@ -12109,9 +12168,19 @@ static void handle_3same_float(DisasContext* s, int size, int elements,
                 la_vfcmp_cond_s(vreg_d, vreg_m, vreg_n, FCMP_COND_SLT);
                 break;
             case 0x7d: /* FACGT */
-                la_fabs_s(vtemp, vreg_n);
-                la_fabs_s(vtemp1, vreg_m);
-                la_vfcmp_cond_s(vreg_d, vtemp1, vtemp, FCMP_COND_SLT);
+                la_vori_b(vtemp2, vreg_n, 0);
+                la_vori_b(vtemp3, vreg_m, 0);
+                for (int i = 0; i < elements; ++i) {
+                    la_vreplvei_w(vtemp, vtemp2, i);
+                    la_fabs_s(vtemp, vtemp);
+                    la_vextrins_w(vreg_d, vtemp, i << 4);
+                }
+                for (int i = 0; i < elements; ++i) {
+                    la_vreplvei_w(vtemp1, vtemp3, i);
+                    la_fabs_s(vtemp1, vtemp1);
+                    la_vextrins_w(vtemp, vtemp1, i << 4);
+                }
+                la_vfcmp_cond_s(vreg_d, vtemp, vreg_d, FCMP_COND_CLT);
                 break;
             default:
                 g_assert_not_reached();
@@ -12180,10 +12249,12 @@ static void handle_3same_float_scalar(DisasContext* s, int size, int fpopcode,
             case 0x5d: /* FACGE */
             {
                 IR2_OPND vt = ra_alloc_ftemp();
-                la_fabs_d(vreg_d, vreg_n);
+                IR2_OPND vn_abs = ra_alloc_ftemp();
+                la_fabs_d(vn_abs, vreg_n);
                 la_fabs_d(vt, vreg_m);
-                la_vfcmp_cond_d(vreg_d, vt, vreg_d, FCMP_COND_SLE);
+                la_vfcmp_cond_d(vreg_d, vt, vn_abs, FCMP_COND_CLE);
                 free_alloc_fpr(vt);
+                free_alloc_fpr(vn_abs);
             } break;
             case 0x7a: /* FABD */
                 la_fsub_d(vreg_d, vreg_n, vreg_m);
@@ -12195,10 +12266,12 @@ static void handle_3same_float_scalar(DisasContext* s, int size, int fpopcode,
             case 0x7d: /* FACGT */
             {
                 IR2_OPND vt = ra_alloc_ftemp();
-                la_fabs_d(vreg_d, vreg_n);
+                IR2_OPND vn_abs = ra_alloc_ftemp();
+                la_fabs_d(vn_abs, vreg_n);
                 la_fabs_d(vt, vreg_m);
-                la_vfcmp_cond_d(vreg_d, vt, vreg_d, FCMP_COND_SLT);
+                la_vfcmp_cond_d(vreg_d, vt, vn_abs, FCMP_COND_CLT);
                 free_alloc_fpr(vt);
+                free_alloc_fpr(vn_abs);
             } break;
             default:
                 g_assert_not_reached();
@@ -12249,10 +12322,12 @@ static void handle_3same_float_scalar(DisasContext* s, int size, int fpopcode,
             case 0x5d: /* FACGE */
             {
                 IR2_OPND vt = ra_alloc_ftemp();
-                la_fabs_s(vreg_d, vreg_n);
+                IR2_OPND vn_abs = ra_alloc_ftemp();
+                la_fabs_s(vn_abs, vreg_n);
                 la_fabs_s(vt, vreg_m);
-                la_vfcmp_cond_s(vreg_d, vt, vreg_d, FCMP_COND_SLE);
+                la_vfcmp_cond_s(vreg_d, vt, vn_abs, FCMP_COND_CLE);
                 free_alloc_fpr(vt);
+                free_alloc_fpr(vn_abs);
             } break;
             case 0x7a: /* FABD */
                 la_fsub_s(vreg_d, vreg_n, vreg_m);
@@ -12264,10 +12339,12 @@ static void handle_3same_float_scalar(DisasContext* s, int size, int fpopcode,
             case 0x7d: /* FACGT */
             {
                 IR2_OPND vt = ra_alloc_ftemp();
-                la_fabs_s(vreg_d, vreg_n);
+                IR2_OPND vn_abs = ra_alloc_ftemp();
+                la_fabs_s(vn_abs, vreg_n);
                 la_fabs_s(vt, vreg_m);
-                la_vfcmp_cond_s(vreg_d, vt, vreg_d, FCMP_COND_SLT);
+                la_vfcmp_cond_s(vreg_d, vt, vn_abs, FCMP_COND_CLT);
                 free_alloc_fpr(vt);
+                free_alloc_fpr(vn_abs);
             } break;
                 break;
             default:
@@ -13351,25 +13428,49 @@ static void handle_2misc_reciprocal(DisasContext* s, int opcode,
                 la_vfrecip_d(vreg_d, vreg_n);
             else
                 la_vfrecip_s(vreg_d, vreg_n);
-        } else if (opcode == 0x3f) { /* FRECPX: new_exp = max_exp - old_exp, mantissa=0 */
+        } else if (opcode == 0x3f) { /* FRECPX: new_exp = max_exp - old_exp, preserve sign */
             IR2_OPND tg = ra_alloc_itemp(), tg2 = ra_alloc_itemp();
+            IR2_OPND tsign = ra_alloc_itemp();
+            IR2_OPND vresult = ra_alloc_ftemp();
             if (size == 3) {
                 la_movfr2gr_d(tg, vreg_n);
+                /* Preserve sign bit */
+                la_bstrpick_d(tsign, tg, 63, 63);
+                la_slli_d(tsign, tsign, 63);
+                /* Extract exponent */
                 la_bstrpick_d(tg, tg, 62, 52);
                 li_d(tg2, 0x7FF);
                 la_sub_d(tg, tg2, tg);
                 la_slli_d(tg, tg, 52);
-                la_movgr2fr_d(vreg_d, tg);
+                la_or(tg, tg, tsign);
+                la_movgr2fr_d(vresult, tg);
+                /* NaN detection: unordered comparison with self */
+                IR2_OPND vnan = ra_alloc_ftemp();
+                la_vfcmp_cond_d(vnan, vreg_n, vreg_n, FCMP_COND_CUN);
+                la_vbitsel_v(vreg_d, vresult, vreg_n, vnan);
+                free_alloc_fpr(vnan);
             } else {
                 la_movfr2gr_s(tg, vreg_n);
+                /* Preserve sign bit */
+                la_bstrpick_w(tsign, tg, 31, 31);
+                la_slli_w(tsign, tsign, 31);
+                /* Extract exponent */
                 la_bstrpick_w(tg, tg, 30, 23);
                 li_d(tg2, 0xFF);
                 la_sub_w(tg, tg2, tg);
                 la_slli_w(tg, tg, 23);
-                la_movgr2fr_w(vreg_d, tg);
+                la_or(tg, tg, tsign);
+                la_movgr2fr_w(vresult, tg);
+                /* NaN detection */
+                IR2_OPND vnan = ra_alloc_ftemp();
+                la_vfcmp_cond_s(vnan, vreg_n, vreg_n, FCMP_COND_CUN);
+                la_vbitsel_v(vreg_d, vresult, vreg_n, vnan);
+                free_alloc_fpr(vnan);
             }
             free_alloc_gpr(tg);
             free_alloc_gpr(tg2);
+            free_alloc_gpr(tsign);
+            free_alloc_fpr(vresult);
         } else if (opcode == 0x7d) { /* FRSQRTE (scalar & vector) */
             if (size == 3)
                 la_vfrsqrt_d(vreg_d, vreg_n);
@@ -16012,25 +16113,41 @@ static void handle_simd_3same_pair(DisasContext* s, int is_q, int u, int opcode,
             if (size == 2) {
                 la_vpickev_w(vtemp, vreg_m, vreg_n);
                 la_vpickod_w(vtemp1, vreg_m, vreg_n);
-                if (opcode == 0x5e)
+                if (opcode == 0x5e || opcode == 0x58) {
                     la_vfmax_s(vreg_d, vtemp, vtemp1);
-                else if (opcode == 0x58)
-                    la_vfmaxa_s(vreg_d, vtemp, vtemp1);
-                else if (opcode == 0x7e)
+                } else if (opcode == 0x7e) {
+                    /* FMINP: NaN-propagating min */
+                    IR2_OPND nan_res = ra_alloc_ftemp();
+                    IR2_OPND vmask = ra_alloc_ftemp();
+                    la_vfcmp_cond_s(vmask, vtemp, vtemp1, FCMP_COND_CUN);
+                    la_vfadd_s(nan_res, vtemp, vtemp1);
                     la_vfmin_s(vreg_d, vtemp, vtemp1);
-                else
-                    la_vfmina_s(vreg_d, vtemp, vtemp1);
+                    la_vbitsel_v(vreg_d, vreg_d, nan_res, vmask);
+                    free_alloc_fpr(nan_res);
+                    free_alloc_fpr(vmask);
+                } else {
+                    /* FMINNMP: NaN-ignoring min */
+                    la_vfmin_s(vreg_d, vtemp, vtemp1);
+                }
             } else if (size == 3) {
                 la_vpickev_d(vtemp, vreg_m, vreg_n);
                 la_vpickod_d(vtemp1, vreg_m, vreg_n);
-                if (opcode == 0x5e)
+                if (opcode == 0x5e || opcode == 0x58) {
                     la_vfmax_d(vreg_d, vtemp, vtemp1);
-                else if (opcode == 0x58)
-                    la_vfmaxa_d(vreg_d, vtemp, vtemp1);
-                else if (opcode == 0x7e)
+                } else if (opcode == 0x7e) {
+                    /* FMINP: NaN-propagating min */
+                    IR2_OPND nan_res = ra_alloc_ftemp();
+                    IR2_OPND vmask = ra_alloc_ftemp();
+                    la_vfcmp_cond_d(vmask, vtemp, vtemp1, FCMP_COND_CUN);
+                    la_vfadd_d(nan_res, vtemp, vtemp1);
                     la_vfmin_d(vreg_d, vtemp, vtemp1);
-                else
-                    la_vfmina_d(vreg_d, vtemp, vtemp1);
+                    la_vbitsel_v(vreg_d, vreg_d, nan_res, vmask);
+                    free_alloc_fpr(nan_res);
+                    free_alloc_fpr(vmask);
+                } else {
+                    /* FMINNMP: NaN-ignoring min */
+                    la_vfmin_d(vreg_d, vtemp, vtemp1);
+                }
             } else {
                 assert(0);
             }
