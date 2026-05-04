@@ -9833,6 +9833,45 @@ static void disas_simd_across_lanes(DisasContext* s, uint32_t insn)
 
             break;
         case 0x3:  /* SADDLV, UADDLV */
+            if (size == 3 || (size == 2 && !is_q)) {
+                lata_unallocated_encoding(s);
+                return;
+            }
+            /* Init accumulator: widen first element to 64-bit */
+            la_vslli_d(vtemp2, vreg_n, 64 - esize);
+            if (is_u)
+                la_vsrli_d(vtemp2, vtemp2, 64 - esize);
+            else
+                la_vsrai_d(vtemp2, vtemp2, 64 - esize);
+            for (i = 1; i < elements; i++) {
+                /* Extract element i via pickev/pickod + shift */
+                if (is_q && i >= elements / 2) {
+                    la_vpickod_d(vtemp, vreg_n, vreg_n);
+                    la_vsrli_d(vtemp, vtemp, esize * (i - elements / 2));
+                } else {
+                    la_vpickev_d(vtemp, vreg_n, vreg_n);
+                    la_vsrli_d(vtemp, vtemp, esize * i);
+                }
+                /* Widen element to 64-bit */
+                la_vslli_d(vtemp, vtemp, 64 - esize);
+                if (is_u)
+                    la_vsrli_d(vtemp, vtemp, 64 - esize);
+                else
+                    la_vsrai_d(vtemp, vtemp, 64 - esize);
+                /* Accumulate */
+                la_vadd_d(vtemp2, vtemp2, vtemp);
+            }
+            /* Mask result: keep only double-width bits */
+            {
+                int res_esize = esize * 2;
+                la_vslli_d(vtemp2, vtemp2, 64 - res_esize);
+                if (is_u)
+                    la_vsrli_d(vreg_d, vtemp2, 64 - res_esize);
+                else
+                    la_vsrai_d(vreg_d, vtemp2, 64 - res_esize);
+            }
+            la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
+            break;
         case 0xa:  /* SMAXV, UMAXV */
         case 0x1a: /* SMINV, UMINV */
             if (size == 3 || (size == 2 && !is_q)) {
@@ -9950,6 +9989,7 @@ static void disas_simd_across_lanes(DisasContext* s, uint32_t insn)
                 la_vand_v(vreg_d, vreg_d, fsmask_ir2_opnd);
             } else {
                 /* case 0xc: FMAXNMV/FMINNMV */
+                la_vori_b(vtemp2, vreg_n, 0);
                 la_vreplvei_w(vreg_d, vreg_n, 0);
                 for (i = 1; i < (is_q ? 4 : 2); ++i) {
                     la_vreplvei_w(vtemp, vtemp2, i);
@@ -10619,7 +10659,7 @@ static void disas_simd_scalar_pairwise(DisasContext* s, uint32_t insn)
                 la_vadd_d(vreg_d, vtemp, vreg_n);
                 break;
             case 0xc: /* FMAXNMP */
-                la_vfmax_d(vreg_d, vreg_n, vtemp);
+                la_vfmaxa_d(vreg_d, vreg_n, vtemp);
                 break;
             case 0xd: /* FADDP */
                 la_vfadd_d(vreg_d, vtemp, vreg_n);
@@ -10628,7 +10668,7 @@ static void disas_simd_scalar_pairwise(DisasContext* s, uint32_t insn)
                 la_vfmax_d(vreg_d, vreg_n, vtemp);
                 break;
             case 0x2c: /* FMINNMP */
-                la_vfmin_d(vreg_d, vreg_n, vtemp);
+                la_vfmina_d(vreg_d, vreg_n, vtemp);
                 break;
             case 0x2f: /* FMINP */
                 la_vfmin_d(vreg_d, vreg_n, vtemp);
@@ -10659,7 +10699,7 @@ static void disas_simd_scalar_pairwise(DisasContext* s, uint32_t insn)
 
             switch (opcode) {
                 case 0xc: /* FMAXNMP */
-                    la_vfmax_s(vreg_d, vreg_n, vtemp);
+                    la_vfmaxa_s(vreg_d, vreg_n, vtemp);
                     break;
                 case 0xd: /* FADDP */
                     la_vfadd_s(vreg_d, vtemp, vreg_n);
@@ -10668,7 +10708,7 @@ static void disas_simd_scalar_pairwise(DisasContext* s, uint32_t insn)
                     la_vfmax_s(vreg_d, vreg_n, vtemp);
                     break;
                 case 0x2c: /* FMINNMP */
-                    la_vfmin_s(vreg_d, vreg_n, vtemp);
+                    la_vfmina_s(vreg_d, vreg_n, vtemp);
                     break;
                 case 0x2f: /* FMINP */
                     la_vfmin_s(vreg_d, vreg_n, vtemp);
@@ -10717,7 +10757,16 @@ static void handle_scalar_simd_shri(DisasContext* s,
             bool is_rounding = (opcode == 0x06);
             int esize = 8 << size;
             if (shift >= esize) {
-                la_vandi_b(vtemp, vtemp, 0);
+                if (is_rounding && is_u) {
+                    /* URSRA: unsigned rounding shift >= esize => (x >> (esize-1)) & 1 */
+                    la_vsrli_d(vtemp, vtemp, esize - 1);
+                } else if (!is_rounding && !is_u) {
+                    /* SSRA: signed shift >= esize => all sign bits */
+                    la_vsrai_d(vtemp, vtemp, esize - 1);
+                } else {
+                    /* USRA, SRSRA: shift >= esize => 0 */
+                    la_vandi_b(vtemp, vtemp, 0);
+                }
             } else if (is_rounding) {
                 if (is_u)
                     la_vsrlri_d(vtemp, vtemp, shift);
@@ -10736,7 +10785,12 @@ static void handle_scalar_simd_shri(DisasContext* s,
         case 0x08: /* SRI: result = (vd & ~(ones>>shift)) | (vn >> shift) */
         {
             int esize = 8 << size;
-            if (shift > 0 && shift < esize) {
+            if (shift == 0) {
+                /* SRI with shift=0: mask=0, result = vn */
+                la_vori_b(vreg_d, vtemp, 0);
+            } else if (shift < esize) {
+                /* Shift vn right (SRI always uses logical shift) */
+                la_vsrli_d(vtemp, vtemp, shift);
                 IR2_OPND vmask = ra_alloc_ftemp();
                 IR2_OPND igpr = ra_alloc_itemp();
                 la_vxor_v(vmask, vmask, vmask); /* clear mask */
@@ -10749,7 +10803,7 @@ static void handle_scalar_simd_shri(DisasContext* s,
                 la_vor_v(vreg_d, vtemp, vmask);
                 free_alloc_fpr(vmask);
             }
-            /* shift==0 or shift==64: result = vd unchanged */
+            /* shift >= esize: vn>>esize=0, mask=all-1s → result=vd unchanged */
         } break;
 
         case 0x00: /* SSHR / USHR */
@@ -10758,7 +10812,16 @@ static void handle_scalar_simd_shri(DisasContext* s,
             int esize = 8 << size;
             bool is_rounding = (opcode == 0x04);
             if (shift >= esize) {
-                la_vandi_b(vtemp, vtemp, 0);
+                if (is_rounding && is_u) {
+                    /* URSHR: unsigned rounding shift >= esize => (x >> (esize-1)) & 1 */
+                    la_vsrli_d(vtemp, vtemp, esize - 1);
+                } else if (!is_rounding && !is_u) {
+                    /* SSHR: signed shift >= esize => all sign bits */
+                    la_vsrai_d(vtemp, vtemp, esize - 1);
+                } else {
+                    /* USHR, SRSHR: shift >= esize => 0 */
+                    la_vandi_b(vtemp, vtemp, 0);
+                }
             } else if (is_rounding) {
                 if (is_u)
                     la_vsrlri_d(vtemp, vtemp, shift);
@@ -10865,10 +10928,10 @@ static void handle_vec_simd_sqshrn(DisasContext* s, bool is_scalar, bool is_q,
         vreg = vreg_d;
         la_vori_b(vtemp2, vreg_n, 0);
     } else if (is_q) {
-        /* XTN2: narrow upper half of source, place in upper half of dest */
+        /* SQSHRN2/UQSHRN2 narrow the whole source to 64 bits, then insert it
+         * into the destination high half.  The source is not pre-shifted. */
         vreg = vtemp;
-        /* Shift source right by 8 bytes to bring upper elements to low position */
-        la_vbsrl_v(vtemp2, vreg_n, 8);
+        la_vori_b(vtemp2, vreg_n, 0);
     } else {
         vreg = vreg_d;
         la_vori_b(vtemp2, vreg_n, 0);
@@ -12090,31 +12153,27 @@ static void handle_3same_float_scalar(DisasContext* s, int size, int fpopcode,
                 break;
             case 0x1f: /* FRECPS: 2.0 - vn * vm */
             {
-                la_fmul_s(vreg_d, vreg_n, vreg_m);
+                la_fmul_d(vreg_d, vreg_n, vreg_m);
                 IR2_OPND _it = ra_alloc_itemp(), _vc = ra_alloc_ftemp();
-                li_d(_it, 0x40000000);
-                la_movgr2fr_w(_vc, _it);
-                la_fsub_s(vreg_d, _vc, vreg_d);
+                li_d(_it, 0x4000000000000000ULL);   /* 2.0 */
+                la_movgr2fr_d(_vc, _it);
+                la_fsub_d(vreg_d, _vc, vreg_d);
                 free_alloc_fpr(_vc);
                 free_alloc_gpr(_it);
             } break;
-                return;
-                break;
             case 0x3f: /* FRSQRTS: (3.0 - vn * vm) / 2.0 */
             {
-                la_fmul_s(vreg_d, vreg_n, vreg_m);
+                la_fmul_d(vreg_d, vreg_n, vreg_m);
                 IR2_OPND _it2 = ra_alloc_itemp(), _vc2 = ra_alloc_ftemp();
-                li_d(_it2, 0x40400000);
-                la_movgr2fr_w(_vc2, _it2);
-                la_fsub_s(vreg_d, _vc2, vreg_d);
-                li_d(_it2, 0x3f000000);
-                la_movgr2fr_w(_vc2, _it2);
-                la_fmul_s(vreg_d, vreg_d, _vc2);
+                li_d(_it2, 0x4008000000000000ULL);  /* 3.0 */
+                la_movgr2fr_d(_vc2, _it2);
+                la_fsub_d(vreg_d, _vc2, vreg_d);
+                li_d(_it2, 0x3FE0000000000000ULL);  /* 0.5 */
+                la_movgr2fr_d(_vc2, _it2);
+                la_fmul_d(vreg_d, vreg_d, _vc2);
                 free_alloc_fpr(_vc2);
                 free_alloc_gpr(_it2);
             } break;
-                return;
-                break;
             case 0x5c: /* FCMGE */
                 la_vfcmp_cond_d(vreg_d, vreg_m, vreg_n, FCMP_COND_SLE);
                 break;
@@ -12151,7 +12210,7 @@ static void handle_3same_float_scalar(DisasContext* s, int size, int fpopcode,
 
         switch (fpopcode) {
             case 0x1b: /* FMULX */
-                la_vfmul_d(vreg_d, vreg_n, vreg_m);
+                la_vfmul_s(vreg_d, vreg_n, vreg_m);
                 break;
             case 0x1c: /* FCMEQ */
                 lata_unallocated_encoding(s);
@@ -12959,7 +13018,8 @@ static void handle_2misc_64(DisasContext* s, int opcode, bool u,
                 la_vclz_d(vclz_v, *vreg_n);
                 la_vslti_d(vsgn_v, *vreg_n, 0);
                 la_vbitsel_v(*vreg_d, vclz_v, vclo_v, vsgn_v);
-                la_vnori_b(vone_v, vone_v, 0);
+                la_vxor_v(vone_v, vone_v, vone_v);   /* all zeros */
+                la_vnori_b(vone_v, vone_v, 0);        /* all ones = -1 */
                 la_vadd_d(*vreg_d, *vreg_d, vone_v); /* subtract 1 */
                 free_alloc_fpr(vclo_v);
                 free_alloc_fpr(vclz_v);
@@ -12970,7 +13030,22 @@ static void handle_2misc_64(DisasContext* s, int opcode, bool u,
         case 0x5: /* NOT */
             break;
         case 0x7: /* SQABS, SQNEG */
-            break;
+        {
+            IR2_OPND zero = ra_alloc_ftemp();
+            la_vxor_v(zero, zero, zero);
+            if (u) {
+                /* SQNEG: vd = vssub(0, vn) */
+                la_vssub_d(*vreg_d, zero, *vreg_n);
+            } else {
+                /* SQABS: vd = vmax(vn, vssub(0, vn)) */
+                IR2_OPND vneg = ra_alloc_ftemp();
+                la_vssub_d(vneg, zero, *vreg_n);
+                la_vmax_d(*vreg_d, *vreg_n, vneg);
+                free_alloc_fpr(vneg);
+            }
+            free_alloc_fpr(zero);
+        }
+        break;
         case 0xa: /* CMLT */
         do_cmop:
             break;
@@ -13087,11 +13162,13 @@ static void handle_2misc_64(DisasContext* s, int opcode, bool u,
         } break;
         /* FCVTZU at 0x5f/0x7f: handled by FSQRT case (value error, TBD) */
         case 0x18: /* FRINTN */
+            la_vfrintrne_d(*vreg_d, *vreg_n);
             break;
         case 0x19: /* FRINTM */
             la_vfrintrm_d(*vreg_d, *vreg_n);
             break;
         case 0x38: /* FRINTP */
+            la_vfrintrp_d(*vreg_d, *vreg_n);
             break;
         case 0x39: /* FRINTZ */
             la_vfrintrz_d(*vreg_d, *vreg_n);
@@ -13130,8 +13207,10 @@ static void handle_2misc_64(DisasContext* s, int opcode, bool u,
             break;
         }
         case 0x79: /* FRINTI */
+            la_vfrint_d(*vreg_d, *vreg_n);
             break;
         case 0x59: /* FRINTX */
+            la_vfrint_d(*vreg_d, *vreg_n);
             break;
         case 0x1e: /* FRINT32Z */
         case 0x5e: /* FRINT32X */
@@ -13411,12 +13490,7 @@ static void handle_2misc_narrow(DisasContext* s, bool scalar, int opcode,
             if (u) {
                 /* SQXTUN / SQXTUN2: signed→unsigned saturating narrow.
                    Use vssrani_bu_* which handles clamp+saturate+pack in one step. */
-                if (is_q) {
-                    /* SQXTUN2: narrow upper half → place in upper half of dest */
-                    la_vbsrl_v(vmask, vreg_n, 8); /* extract upper half */
-                } else {
-                    la_vori_b(vmask, vreg_n, 0);
-                }
+                la_vori_b(vmask, vreg_n, 0);
                 /* vssrani_bu_*: signed→unsigned saturated narrow, single instruction */
                 switch (size) {
                     case 0: la_vssrani_bu_h(vtemp1, vmask, 0); break;
@@ -13433,37 +13507,24 @@ static void handle_2misc_narrow(DisasContext* s, bool scalar, int opcode,
                     la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
                 }
             } else {
+                switch (size) {
+                    case 0: la_vpickev_b(vtemp, vtemp, vreg_n); break;
+                    case 1: la_vpickev_h(vtemp, vtemp, vreg_n); break;
+                    case 2: la_vpickev_w(vtemp, vtemp, vreg_n); break;
+                    case 3: la_vpickev_d(vtemp, vtemp, vreg_n); break;
+                    default: lata_unallocated_encoding(s); return;
+                }
                 if (is_q) {
-                    /* XTN2: narrow lower half of source, place in upper half of dest.
-                       vpickev_d picks vk (2nd arg) first, vj (1st arg) second.
-                       So vpickev_d(vd, vtemp, vd): vd[0]=vd[0](low orig), vd[1]=vtemp[0](narrow). */
-                    switch (size) {
-                        case 0: la_vpickev_b(vtemp, vtemp, vreg_n); break;
-                        case 1: la_vpickev_h(vtemp, vtemp, vreg_n); break;
-                        case 2: la_vpickev_w(vtemp, vtemp, vreg_n); break;
-                        case 3: la_vpickev_d(vtemp, vtemp, vreg_n); break;
-                        default: lata_unallocated_encoding(s); return;
-                    }
                     la_vpickev_d(vreg_d, vtemp, vreg_d);
                 } else {
-                    switch (size) {
-                        case 0: la_vpickev_b(vreg_d, vtemp, vreg_n); break;
-                        case 1: la_vpickev_h(vreg_d, vtemp, vreg_n); break;
-                        case 2: la_vpickev_w(vreg_d, vtemp, vreg_n); break;
-                        case 3: la_vpickev_d(vreg_d, vtemp, vreg_n); break;
-                        default: lata_unallocated_encoding(s); return;
-                    }
+                    la_vori_b(vreg_d, vtemp, 0);
                 }
             }
             break;
         }
         case 0x14: /* SQXTN,SQXTN2, UQXTN,UQXTN2 */
         {
-            /* Prepare source: for Q=1, extract upper 64 bits */
-            if (is_q)
-                la_vbsrl_v(vmask, vreg_n, 8);
-            else
-                la_vori_b(vmask, vreg_n, 0);
+            la_vori_b(vmask, vreg_n, 0);
 
             /* Saturating narrow using vssrani/vssrlni (single instruction:
                saturate + pack), matching dynarmic La64 backend approach. */
@@ -13551,20 +13612,46 @@ static void handle_2misc_satacc(DisasContext* s, bool is_scalar, bool is_u,
      * USQADD (u=1): UnsignedSat(UInt(vd) + SInt(vn))
      * Widen -> add -> saturating narrow approach. */
     if (size == 3) {
-        /* 64-bit SUQADD/USQADD: no widening. Direct 64-bit sat ops. */
+        /* 64-bit mixed signedness needs explicit bounds checks.  LSX signed
+         * and unsigned saturated adds do not match SUQADD/USQADD semantics. */
         IR2_OPND vd = is_scalar ? alloc_fpr_dst(rd) : alloc_fpr_src(rd);
         IR2_OPND vn = alloc_fpr_src(rn);
-        if (!is_u)
-            la_vsadd_d(vd, vd, vn); /* SUQADD: signed + unsigned→signed */
-        else {
-            /* USQADD: unsigned + signed→unsigned. LSX lacks direct instr.
-             * Use vsadd_du if unsigned range OK, else implement manually. */
-            la_vsadd_du(vd, vd, vn);
+        IR2_OPND tmp = ra_alloc_ftemp();
+        IR2_OPND mask = ra_alloc_ftemp();
+        if (!is_u) {
+            /* SUQADD: signed accumulator plus unsigned operand, saturated to
+             * signed range.  Since the operand is non-negative, only positive
+             * overflow is possible: vn > INT64_MAX - vd. */
+            IR2_OPND int64_max = ra_alloc_ftemp();
+            la_vxor_v(int64_max, int64_max, int64_max);
+            la_vsubi_du(int64_max, int64_max, 1);
+            la_vbitclri_d(int64_max, int64_max, 63);
+            la_vsub_d(tmp, int64_max, vd);
+            la_vslt_du(mask, tmp, vn);
+            la_vadd_d(tmp, vd, vn);
+            la_vbitsel_v(vd, tmp, int64_max, mask);
+            free_alloc_fpr(int64_max);
+        } else {
+            /* USQADD: unsigned accumulator plus signed operand, saturated to
+             * unsigned range.  Positive operands saturate upward; negative
+             * operands subtract their absolute value and saturate at zero. */
+            IR2_OPND neg_op = ra_alloc_ftemp();
+            IR2_OPND neg_res = ra_alloc_ftemp();
+            la_vsrai_d(mask, vn, 63);
+            la_vnori_b(neg_op, vn, 0);
+            la_vaddi_du(neg_op, neg_op, 1);
+            la_vsadd_du(tmp, vd, vn);
+            la_vssub_du(neg_res, vd, neg_op);
+            la_vbitsel_v(vd, tmp, neg_res, mask);
+            free_alloc_fpr(neg_op);
+            free_alloc_fpr(neg_res);
         }
         if (is_scalar) {
             la_vinsgr2vr_d(vd, zero_ir2_opnd, 1);
             store_fpr_dst(rd, vd);
         }
+        free_alloc_fpr(tmp);
+        free_alloc_fpr(mask);
         free_alloc_fpr(vd);
         free_alloc_fpr(vn);
         return;
@@ -13779,7 +13866,45 @@ static void disas_simd_scalar_two_reg_misc(DisasContext* s, uint32_t insn)
             handle_2misc_satacc(s, true, u, false, size, rn, rd);
             return;
         case 0x7: /* SQABS / SQNEG */
-            break;
+        {
+            if (!fp_access_check(s)) {
+                return;
+            }
+            IR2_OPND vreg_d = alloc_fpr_dst(rd);
+            IR2_OPND vreg_n = alloc_fpr_src(rn);
+            IR2_OPND vzero = ra_alloc_ftemp();
+            la_vxor_v(vzero, vzero, vzero);
+            if (u) {
+                /* SQNEG: scalar saturating negate = vssub(0, vn) */
+                switch (size) {
+                    case 0: la_vssub_b(vreg_d, vzero, vreg_n); break;
+                    case 1: la_vssub_h(vreg_d, vzero, vreg_n); break;
+                    case 2: la_vssub_w(vreg_d, vzero, vreg_n); break;
+                    case 3: la_vssub_d(vreg_d, vzero, vreg_n); break;
+                }
+            } else {
+                /* SQABS: scalar saturating abs = vmax(vn, vssub(0, vn)) */
+                IR2_OPND vneg = ra_alloc_ftemp();
+                switch (size) {
+                    case 0: la_vssub_b(vneg, vzero, vreg_n); break;
+                    case 1: la_vssub_h(vneg, vzero, vreg_n); break;
+                    case 2: la_vssub_w(vneg, vzero, vreg_n); break;
+                    case 3: la_vssub_d(vneg, vzero, vreg_n); break;
+                }
+                switch (size) {
+                    case 0: la_vmax_b(vreg_d, vreg_n, vneg); break;
+                    case 1: la_vmax_h(vreg_d, vreg_n, vneg); break;
+                    case 2: la_vmax_w(vreg_d, vreg_n, vneg); break;
+                    case 3: la_vmax_d(vreg_d, vreg_n, vneg); break;
+                }
+                free_alloc_fpr(vneg);
+            }
+            free_alloc_fpr(vzero);
+            store_fpr_dst(rd, vreg_d);
+            free_alloc_fpr(vreg_d);
+            free_alloc_fpr(vreg_n);
+        }
+            return;
         case 0xa: /* CMLT */
             if (u) {
                 lata_unallocated_encoding(s);
@@ -13793,6 +13918,25 @@ static void disas_simd_scalar_two_reg_misc(DisasContext* s, uint32_t insn)
                 lata_unallocated_encoding(s);
                 return;
             }
+            if (!fp_access_check(s)) {
+                return;
+            }
+            {
+                IR2_OPND vreg_d = alloc_fpr_dst(rd);
+                IR2_OPND vreg_n = alloc_fpr_src(rn);
+                if (u) {
+                    la_vneg_d(vreg_d, vreg_n);
+                } else {
+                    IR2_OPND vzero = ra_alloc_ftemp();
+                    la_vxor_v(vzero, vzero, vzero);
+                    la_vabsd_d(vreg_d, vreg_n, vzero);
+                    free_alloc_fpr(vzero);
+                }
+                store_fpr_dst(rd, vreg_d);
+                free_alloc_fpr(vreg_d);
+                free_alloc_fpr(vreg_n);
+            }
+            return;
             break;
         case 0x12: /* SQXTUN */
             if (!u) {
@@ -13966,28 +14110,28 @@ static void handle_vec_simd_shri(DisasContext* s, bool is_q, bool is_u,
             break;
 
         case 0x08: /* SRI: result = (vd & mask) | (vn >> shift)
-                      mask = ones(esize) << (esize - shift), high shift bits = 1 */
+                      mask = ~(ones(esize) >> shift) per lane */
         {
             int esize = 8 << size;
-            if (shift < esize) {
+            if (shift == 0) {
+                /* shift==0: mask=0, result = vn */
+                la_vori_b(vreg_d, vtemp, 0);
+            } else if (shift < esize) {
                 switch (size) {
                     case 0: la_vsrli_b(vtemp, vtemp, shift); break;
                     case 1: la_vsrli_h(vtemp, vtemp, shift); break;
                     case 2: la_vsrli_w(vtemp, vtemp, shift); break;
                     case 3: la_vsrli_d(vtemp, vtemp, shift); break;
                 }
-                /* mask = ones(esize) << (esize - shift) per lane */
+                /* mask = (ones(esize) << (esize - shift)) & ones(esize) per lane */
                 IR2_OPND vmask = ra_alloc_ftemp();
                 IR2_OPND igpr = ra_alloc_itemp();
-                uint64_t lane_mask = ((1ULL << shift) - 1) << (esize - shift);
                 if (esize == 64) {
-                    uint64_t lane_val = ((1ULL << shift) - 1) << (64 - shift);
+                    uint64_t lane_val = ~0ULL << (64 - shift);
                     li_d(igpr, lane_val);
-                    if (is_q)
-                        la_vreplgr2vr_d(vmask, igpr);
-                    else
-                        la_vreplgr2vr_d(vmask, igpr);
+                    la_vreplgr2vr_d(vmask, igpr);
                 } else {
+                    uint64_t lane_mask = ((1ULL << esize) - 1) << (esize - shift);
                     li_w(igpr, (uint32_t)lane_mask);
                     if (esize == 8)
                         la_vreplgr2vr_b(vmask, igpr);
@@ -14053,12 +14197,25 @@ static void handle_vec_simd_shri(DisasContext* s, bool is_q, bool is_u,
             break;
 
         case 0x04: /* SRSHR / URSHR (rounding) */
-            if (is_u) {
-                /* Shift count the same size as element size produces zero.  */
-                if (shift == 8 << size) {
+            /* Shift count equal to element size:
+               signed SRSHR => always 0 (rounding cannot affect result).
+               unsigned URSHR => (x >> (esize-1)) & 1. */
+            if (shift == 8 << size) {
+                if (is_u) {
+                    /* URSHR with shift==esize: result = (x >> (esize-1)) & 1,
+                       which is just x >> (esize-1) since the result is 0 or 1. */
+                    switch (size) {
+                        case 0: la_vsrli_b(vreg_d, vtemp, 7); break;
+                        case 1: la_vsrli_h(vreg_d, vtemp, 15); break;
+                        case 2: la_vsrli_w(vreg_d, vtemp, 31); break;
+                        case 3: la_vsrli_d(vreg_d, vtemp, 63); break;
+                    }
+                } else {
                     la_vandi_b(vreg_d, vtemp, 0);
-                    break;
                 }
+                break;
+            }
+            if (is_u) {
                 switch (size) {
                     case 0:
                         la_vsrlri_b(vreg_d, vtemp, shift);
@@ -14076,10 +14233,6 @@ static void handle_vec_simd_shri(DisasContext* s, bool is_q, bool is_u,
                         assert(0);
                 }
             } else {
-                /* Shift count the same size as element size produces all sign.  */
-                if (shift == 8 << size) {
-                    shift -= 1;
-                }
                 switch (size) {
                     case 0:
                         la_vsrari_b(vreg_d, vtemp, shift);
@@ -14100,10 +14253,25 @@ static void handle_vec_simd_shri(DisasContext* s, bool is_q, bool is_u,
             break;
 
         case 0x06: /* SRSRA / URSRA (accum + rounding) */
-            if (is_u) {
-                if (shift == 8 << size) {
-                    break;
+            /* Shift count equal to element size:
+               unsigned => add (x >> (esize-1)) & 1 to dest.
+               signed => always 0, no-op. */
+            if (shift == 8 << size) {
+                if (is_u) {
+                    switch (size) {
+                        case 0: la_vsrli_b(vtemp1, vtemp, 7);
+                                la_vadd_b(vreg_d, vreg_d, vtemp1); break;
+                        case 1: la_vsrli_h(vtemp1, vtemp, 15);
+                                la_vadd_h(vreg_d, vreg_d, vtemp1); break;
+                        case 2: la_vsrli_w(vtemp1, vtemp, 31);
+                                la_vadd_w(vreg_d, vreg_d, vtemp1); break;
+                        case 3: la_vsrli_d(vtemp1, vtemp, 63);
+                                la_vadd_d(vreg_d, vreg_d, vtemp1); break;
+                    }
                 }
+                break;
+            }
+            if (is_u) {
                 switch (size) {
                     case 0:
                         la_vsrlri_b(vtemp1, vtemp, shift);
@@ -14124,9 +14292,6 @@ static void handle_vec_simd_shri(DisasContext* s, bool is_q, bool is_u,
                     default: assert(0);
                 }
             } else {
-                if (shift == 8 << size) {
-                    shift -= 1;
-                }
                 switch (size) {
                     case 0:
                         la_vsrari_b(vtemp1, vtemp, shift);
@@ -14568,31 +14733,31 @@ static void handle_3rd_widening(DisasContext* s, int is_q, int is_u, int size,
                 if (is_u) {
                     switch (size) {
                         case 0:
-                            la_vsllwil_hu_bu(vreg_d, vreg_n, 0);
                             la_vsllwil_hu_bu(vtemp, vreg_m, 0);
+                            la_vsllwil_hu_bu(vreg_d, vreg_n, 0);
                             break;
                         case 1:
-                            la_vsllwil_wu_hu(vreg_d, vreg_n, 0);
                             la_vsllwil_wu_hu(vtemp, vreg_m, 0);
+                            la_vsllwil_wu_hu(vreg_d, vreg_n, 0);
                             break;
                         case 2:
-                            la_vsllwil_du_wu(vreg_d, vreg_n, 0);
                             la_vsllwil_du_wu(vtemp, vreg_m, 0);
+                            la_vsllwil_du_wu(vreg_d, vreg_n, 0);
                             break;
                     }
                 } else {
                     switch (size) {
                         case 0:
-                            la_vsllwil_h_b(vreg_d, vreg_n, 0);
                             la_vsllwil_h_b(vtemp, vreg_m, 0);
+                            la_vsllwil_h_b(vreg_d, vreg_n, 0);
                             break;
                         case 1:
-                            la_vsllwil_w_h(vreg_d, vreg_n, 0);
                             la_vsllwil_w_h(vtemp, vreg_m, 0);
+                            la_vsllwil_w_h(vreg_d, vreg_n, 0);
                             break;
                         case 2:
-                            la_vsllwil_d_w(vreg_d, vreg_n, 0);
                             la_vsllwil_d_w(vtemp, vreg_m, 0);
+                            la_vsllwil_d_w(vreg_d, vreg_n, 0);
                             break;
                     }
                 }
@@ -14600,9 +14765,9 @@ static void handle_3rd_widening(DisasContext* s, int is_q, int is_u, int size,
                 if (is_abd) {
                     if (is_u) {
                         switch (size) {
-                            case 0: la_vabsd_hu(vreg_d, vreg_d, vtemp); break;
-                            case 1: la_vabsd_wu(vreg_d, vreg_d, vtemp); break;
-                            case 2: la_vabsd_du(vreg_d, vreg_d, vtemp); break;
+                            case 0: la_vabsd_hu(vreg_d, vtemp, vreg_d); break;
+                            case 1: la_vabsd_wu(vreg_d, vtemp, vreg_d); break;
+                            case 2: la_vabsd_du(vreg_d, vtemp, vreg_d); break;
                         }
                     } else {
                         switch (size) {
@@ -14624,7 +14789,6 @@ static void handle_3rd_widening(DisasContext* s, int is_q, int is_u, int size,
                         case 2: la_vadd_d(vreg_d, vreg_d, vtemp); break;
                     }
                 }
-                la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
             }
             break;
         case 0x5:  /* SABAL, SABAL2 */
@@ -14978,67 +15142,34 @@ static void handle_3rd_widening(DisasContext* s, int is_q, int is_u, int size,
             break;
         case 0xd: /* SQDMULL, SQDMULL2 */
             vreg_d = alloc_fpr_dst(rd);
-            if (!is_q) {
-                switch (size) {
-                    case 1:
-                        la_vilvl_h(vtemp, vzero, vreg_n);
-                        la_vilvl_h(vtemp1, vzero, vreg_m);
-                        la_vmulwev_w_h(vzero, vtemp, vtemp1);
-                        lata_helper_addl_saturate_s32(s, vreg_d, vzero, vzero, rd);
-                        break;
-                    case 2:
-                        la_vilvl_w(vtemp, vzero, vreg_n);
-                        la_vilvl_w(vtemp1, vzero, vreg_m);
-                        la_vmulwev_d_w(vzero, vtemp, vtemp1);
-                        lata_helper_addl_saturate_s64(s, vzero, vzero, vzero, rd);
-                        break;
-                    default:
-                        assert(0);
-                }
-
-            } else {
-                /* is_q=1: 128-bit destination, handle lower+upper halves */
-                IR2_OPND vlo = ra_alloc_ftemp();
-                IR2_OPND vhi = ra_alloc_ftemp();
-                switch (size) {
-                    case 1:
-                        /* Lower half */
-                        la_vilvl_h(vtemp, vzero, vreg_n);
-                        la_vilvl_h(vtemp1, vzero, vreg_m);
-                        la_vmulwev_w_h(vlo, vtemp, vtemp1);
-                        /* Upper half */
+            /* SQDMULL (is_q=0): widen lower half → 4x32/2x64 result.
+             * SQDMULL2 (is_q=1): widen upper half → 4x32/2x64 result.
+             * Both produce 128-bit destination, no narrowing needed. */
+            switch (size) {
+                case 1:
+                    if (is_q) {
                         la_vilvh_h(vtemp, vzero, vreg_n);
                         la_vilvh_h(vtemp1, vzero, vreg_m);
-                        la_vmulwev_w_h(vhi, vtemp, vtemp1);
-                        break;
-                    case 2:
-                        la_vilvl_w(vtemp, vzero, vreg_n);
-                        la_vilvl_w(vtemp1, vzero, vreg_m);
-                        la_vmulwev_d_w(vlo, vtemp, vtemp1);
+                    } else {
+                        la_vilvl_h(vtemp, vzero, vreg_n);
+                        la_vilvl_h(vtemp1, vzero, vreg_m);
+                    }
+                    la_vmulwev_w_h(vzero, vtemp, vtemp1);
+                    lata_helper_addl_saturate_s32(s, vreg_d, vzero, vzero, rd);
+                    break;
+                case 2:
+                    if (is_q) {
                         la_vilvh_w(vtemp, vzero, vreg_n);
                         la_vilvh_w(vtemp1, vzero, vreg_m);
-                        la_vmulwev_d_w(vhi, vtemp, vtemp1);
-                        break;
-                    default:
-                        lata_unallocated_encoding(s);
-                        return;
-                }
-                /* Double and saturate */
-                if (size == 1) {
-                    la_vsadd_w(vlo, vlo, vlo);
-                    la_vsadd_w(vhi, vhi, vhi);
-                    la_vssrani_h_w(vreg_d, vlo, 0);
-                    /* merge: vilvl_d to combine lower and upper */
-                    /* Actually vssrani narrows to lower half. Need vssrarni for upper. */
-                    la_vssrarni_h_w(vreg_d, vhi, 0);
-                } else {
-                    la_vsadd_d(vlo, vlo, vlo);
-                    la_vsadd_d(vhi, vhi, vhi);
-                    la_vssrani_w_d(vreg_d, vlo, 0);
-                    la_vssrarni_w_d(vreg_d, vhi, 0);
-                }
-                free_alloc_fpr(vlo);
-                free_alloc_fpr(vhi);
+                    } else {
+                        la_vilvl_w(vtemp, vzero, vreg_n);
+                        la_vilvl_w(vtemp1, vzero, vreg_m);
+                    }
+                    la_vmulwev_d_w(vzero, vtemp, vtemp1);
+                    lata_helper_addl_saturate_s64(s, vzero, vzero, vzero, rd);
+                    break;
+                default:
+                    assert(0);
             }
             break;
         case 0x10: /* UADDL, UADDL2 */
@@ -15564,9 +15695,16 @@ static void disas_simd_three_reg_diff(DisasContext* s, uint32_t insn)
                         IR2_OPND ctr = ra_alloc_itemp();
                         IR2_OPND loop = ir2_opnd_new_type(IR2_OPND_LABEL);
                         la_vxor_v(vzero, vzero, vzero);
-                        /* Extract sources first — vreg_d may alias vreg_n_fpr */
-                        la_vilvl_b(vawide, vzero, vreg_n_fpr);
-                        la_vilvl_b(vbwide, vzero, vreg_m_fpr);
+                        /* PMULL always writes eight widened halfword products.
+                         * Q selects which 64-bit half of each input is used:
+                         * low half for PMULL, high half for PMULL2. */
+                        if (is_q) {
+                            la_vilvh_b(vawide, vzero, vreg_n_fpr);
+                            la_vilvh_b(vbwide, vzero, vreg_m_fpr);
+                        } else {
+                            la_vilvl_b(vawide, vzero, vreg_n_fpr);
+                            la_vilvl_b(vbwide, vzero, vreg_m_fpr);
+                        }
                         la_vxor_v(vreg_d, vreg_d, vreg_d);
                         /* vldi 0x401: broadcast 1 as 16-bit elements */
                         la_vldi(vmask, 0x401);
@@ -15581,7 +15719,6 @@ static void disas_simd_three_reg_diff(DisasContext* s, uint32_t insn)
                         la_vslli_h(vawide, vawide, 1);
                         la_addi_w(ctr, ctr, -1);
                         la_bnez(ctr, loop);
-                        if (!is_q) { la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1); }
                         store_fpr_dst(rd, vreg_d);
                         free_alloc_fpr(vreg_d);
                         free_alloc_fpr(vreg_n_fpr);
@@ -16015,6 +16152,43 @@ static void disas_simd_3same_float(DisasContext* s, uint32_t insn)
         default:
             lata_unallocated_encoding(s);
             return;
+    }
+}
+
+static void gen_sqdmulh_vec_q(IR2_OPND vd, IR2_OPND vn, IR2_OPND vm,
+    IR2_OPND even, IR2_OPND odd, IR2_OPND tmp, int size, bool rounding)
+{
+    switch (size) {
+        case 1:
+            la_vmulwev_w_h(even, vn, vm);
+            la_vmulwod_w_h(odd, vn, vm);
+            la_vsadd_w(even, even, even);
+            la_vsadd_w(odd, odd, odd);
+            la_vori_b(tmp, even, 0);
+            if (rounding)
+                la_vssrarni_h_w(tmp, odd, 16);
+            else
+                la_vssrani_h_w(tmp, odd, 16);
+            la_vori_b(even, tmp, 0);
+            la_vshuf4i_d(even, even, 0x01);
+            la_vilvl_h(vd, tmp, even);
+            break;
+        case 2:
+            la_vmulwev_d_w(even, vn, vm);
+            la_vmulwod_d_w(odd, vn, vm);
+            la_vsadd_d(even, even, even);
+            la_vsadd_d(odd, odd, odd);
+            la_vori_b(tmp, even, 0);
+            if (rounding)
+                la_vssrarni_w_d(tmp, odd, 32);
+            else
+                la_vssrani_w_d(tmp, odd, 32);
+            la_vori_b(even, tmp, 0);
+            la_vshuf4i_d(even, even, 0x01);
+            la_vilvl_w(vd, tmp, even);
+            break;
+        default:
+            assert(0);
     }
 }
 
@@ -16516,8 +16690,11 @@ static void disas_simd_3same_int(DisasContext* s, uint32_t insn)
                 IR2_OPND vtmp = ra_alloc_ftemp();
                 IR2_OPND ctr = ra_alloc_itemp();
                 IR2_OPND loop = ir2_opnd_new_type(IR2_OPND_LABEL);
-                la_vxor_v(vreg_d, vreg_d, vreg_d);
+                /* Copy the source before clearing the destination.  The guest
+                 * instruction commonly has rd == rn, and LATA may map both to
+                 * the same host FPR. */
                 la_vori_b(vshifted, vreg_n, 0);
+                la_vxor_v(vreg_d, vreg_d, vreg_d);
                 /* vldi imm[12:10]=0b000: broadcast imm[7:0]=1 as 8-bit elements */
                 la_vldi(vmask, 0x001);
                 la_addi_w(ctr, zero_ir2_opnd, 8);
@@ -16574,7 +16751,47 @@ static void disas_simd_3same_int(DisasContext* s, uint32_t insn)
             goto do_gvec_end;
         case 0x16: /* SQDMULH, SQRDMULH */
             // TODO : need handle saturate
-            if (u) {
+            if (is_q) {
+                /* Q=1: even/odd multiply on full 128-bit (ref: dynarmic) */
+                IR2_OPND even = ra_alloc_ftemp();
+                IR2_OPND odd = ra_alloc_ftemp();
+                IR2_OPND tmp = ra_alloc_ftemp();
+                switch (size) {
+                    case 1:
+                        la_vmulwev_w_h(even, vreg_n, vreg_m);
+                        la_vmulwod_w_h(odd, vreg_n, vreg_m);
+                        la_vsadd_w(even, even, even);
+                        la_vsadd_w(odd, odd, odd);
+                        la_vori_b(tmp, even, 0);
+                        if (u)
+                            la_vssrarni_h_w(tmp, odd, 16);
+                        else
+                            la_vssrani_h_w(tmp, odd, 16);
+                        la_vori_b(even, tmp, 0);
+                        la_vshuf4i_d(even, even, 0x01);
+                        la_vilvl_h(vreg_d, tmp, even);
+                        break;
+                    case 2:
+                        la_vmulwev_d_w(even, vreg_n, vreg_m);
+                        la_vmulwod_d_w(odd, vreg_n, vreg_m);
+                        la_vsadd_d(even, even, even);
+                        la_vsadd_d(odd, odd, odd);
+                        la_vori_b(tmp, even, 0);
+                        if (u)
+                            la_vssrarni_w_d(tmp, odd, 32);
+                        else
+                            la_vssrani_w_d(tmp, odd, 32);
+                        la_vori_b(even, tmp, 0);
+                        la_vshuf4i_d(even, even, 0x01);
+                        la_vilvl_w(vreg_d, tmp, even);
+                        break;
+                    default:
+                        assert(0);
+                }
+                free_alloc_fpr(even);
+                free_alloc_fpr(odd);
+                free_alloc_fpr(tmp);
+            } else if (u) {
                 switch (size) {
                     case 1:
                         la_vilvl_h(vtemp, vzero, vreg_n);
@@ -16820,38 +17037,52 @@ static void disas_simd_3same_int(DisasContext* s, uint32_t insn)
                 goto do_gvec_end;
             case 0x4: /* SHSUB, UHSUB — halving sub: (a-b)>>1 */
             {
-                IR2_OPND vt_hs = ra_alloc_ftemp();
+                IR2_OPND vt_ev = ra_alloc_ftemp();
+                /* Widen, subtract, then narrow with shift by 1 */
                 switch (size) {
                     case 0:
-                        la_vsub_b(vt_hs, vreg_n, vreg_m);
-                        if (u)
-                            la_vsrli_b(vreg_d, vt_hs, 1);
-                        else
-                            la_vsrai_b(vreg_d, vt_hs, 1);
+                        if (u) {
+                            la_vsubwev_h_bu(vt_ev, vreg_n, vreg_m);
+                            la_vsubwod_h_bu(vreg_d, vreg_n, vreg_m);
+                            la_vsrlni_b_h(vreg_d, vt_ev, 1);
+                        } else {
+                            la_vsubwev_h_b(vt_ev, vreg_n, vreg_m);
+                            la_vsubwod_h_b(vreg_d, vreg_n, vreg_m);
+                            la_vsrani_b_h(vreg_d, vt_ev, 1);
+                        }
+                        la_vbsrl_v(vt_ev, vreg_d, 8);
+                        la_vilvl_b(vreg_d, vt_ev, vreg_d);
                         break;
                     case 1:
-                        la_vsub_h(vt_hs, vreg_n, vreg_m);
-                        if (u)
-                            la_vsrli_h(vreg_d, vt_hs, 1);
-                        else
-                            la_vsrai_h(vreg_d, vt_hs, 1);
+                        if (u) {
+                            la_vsubwev_w_hu(vt_ev, vreg_n, vreg_m);
+                            la_vsubwod_w_hu(vreg_d, vreg_n, vreg_m);
+                            la_vsrlni_h_w(vreg_d, vt_ev, 1);
+                        } else {
+                            la_vsubwev_w_h(vt_ev, vreg_n, vreg_m);
+                            la_vsubwod_w_h(vreg_d, vreg_n, vreg_m);
+                            la_vsrani_h_w(vreg_d, vt_ev, 1);
+                        }
+                        la_vbsrl_v(vt_ev, vreg_d, 8);
+                        la_vilvl_h(vreg_d, vt_ev, vreg_d);
                         break;
                     case 2:
-                        la_vsub_w(vt_hs, vreg_n, vreg_m);
-                        if (u)
-                            la_vsrli_w(vreg_d, vt_hs, 1);
-                        else
-                            la_vsrai_w(vreg_d, vt_hs, 1);
+                        if (u) {
+                            la_vsubwev_d_wu(vt_ev, vreg_n, vreg_m);
+                            la_vsubwod_d_wu(vreg_d, vreg_n, vreg_m);
+                            la_vsrlni_w_d(vreg_d, vt_ev, 1);
+                        } else {
+                            la_vsubwev_d_w(vt_ev, vreg_n, vreg_m);
+                            la_vsubwod_d_w(vreg_d, vreg_n, vreg_m);
+                            la_vsrani_w_d(vreg_d, vt_ev, 1);
+                        }
+                        la_vbsrl_v(vt_ev, vreg_d, 8);
+                        la_vilvl_w(vreg_d, vt_ev, vreg_d);
                         break;
-                    case 3:
-                        la_vsub_d(vt_hs, vreg_n, vreg_m);
-                        if (u)
-                            la_vsrli_d(vreg_d, vt_hs, 1);
-                        else
-                            la_vsrai_d(vreg_d, vt_hs, 1);
-                        break;
+                    default:
+                        g_assert_not_reached();
                 }
-                free_alloc_fpr(vt_hs);
+                free_alloc_fpr(vt_ev);
                 goto do_gvec_end;
             }
             case 0x9: /* SQSHL, UQSHL — saturating shift left (register) */
@@ -18134,12 +18365,51 @@ static void disas_simd_two_reg_misc(DisasContext* s, uint32_t insn)
                     case 3: la_vclz_d(vreg_d, vreg_n); break;
                 }
             } else {
-                /* CLS: u=0, count leading sign bits */
-                switch (size) {
-                    case 0: la_vclo_b(vreg_d, vreg_n); break;
-                    case 1: la_vclo_h(vreg_d, vreg_n); break;
-                    case 2: la_vclo_w(vreg_d, vreg_n); break;
-                    case 3: la_vclo_d(vreg_d, vreg_n); break;
+                /* CLS: u=0, count leading sign bits.
+                   CLS(x) = leading_sign_bits(x) - 1.
+                   Use CLO for negative, CLZ for positive/zero. */
+                {
+                    IR2_OPND vclo_v = ra_alloc_ftemp();
+                    IR2_OPND vclz_v = ra_alloc_ftemp();
+                    IR2_OPND vsgn_v = ra_alloc_ftemp();
+                    IR2_OPND vone_v = ra_alloc_ftemp();
+                    switch (size) {
+                        case 0:
+                            la_vclo_b(vclo_v, vreg_n);
+                            la_vclz_b(vclz_v, vreg_n);
+                            la_vslti_b(vsgn_v, vreg_n, 0);
+                            break;
+                        case 1:
+                            la_vclo_h(vclo_v, vreg_n);
+                            la_vclz_h(vclz_v, vreg_n);
+                            la_vslti_h(vsgn_v, vreg_n, 0);
+                            break;
+                        case 2:
+                            la_vclo_w(vclo_v, vreg_n);
+                            la_vclz_w(vclz_v, vreg_n);
+                            la_vslti_w(vsgn_v, vreg_n, 0);
+                            break;
+                        case 3:
+                            la_vclo_d(vclo_v, vreg_n);
+                            la_vclz_d(vclz_v, vreg_n);
+                            la_vslti_d(vsgn_v, vreg_n, 0);
+                            break;
+                    }
+                    /* vsgn=-1(neg): select vclo; vsgn=0(pos): select vclz */
+                    la_vbitsel_v(vreg_d, vclz_v, vclo_v, vsgn_v);
+                    /* Subtract 1: CLS = leading_sign_bits - 1 */
+                    la_vxor_v(vone_v, vone_v, vone_v);   /* all zeros */
+                    la_vnori_b(vone_v, vone_v, 0);        /* all ones = -1 */
+                    switch (size) {
+                        case 0: la_vadd_b(vreg_d, vreg_d, vone_v); break;
+                        case 1: la_vadd_h(vreg_d, vreg_d, vone_v); break;
+                        case 2: la_vadd_w(vreg_d, vreg_d, vone_v); break;
+                        case 3: la_vadd_d(vreg_d, vreg_d, vone_v); break;
+                    }
+                    free_alloc_fpr(vclo_v);
+                    free_alloc_fpr(vclz_v);
+                    free_alloc_fpr(vsgn_v);
+                    free_alloc_fpr(vone_v);
                 }
             }
             if (!is_q) la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
@@ -19091,7 +19361,9 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                 la_vfmul_d(vreg_d, vreg_n, vtemp1);
                 break;
             case 0x19: /* FMULX */
-                assert(0);
+                vreg_d = alloc_fpr_dst(rd);
+                la_vreplvei_d(vtemp1, vreg_m, index);
+                la_vfmul_d(vreg_d, vreg_n, vtemp1);
                 break;
             default:
                 g_assert_not_reached();
@@ -19146,10 +19418,23 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                 la_vfmul_s(vreg_d, vreg_n, vtemp1);
                 break;
             case 0x19: /* FMULX */
-                assert(0);
+                vreg_d = alloc_fpr_dst(rd);
+                la_vreplvei_w(vtemp1, vreg_m, index);
+                la_vfmul_s(vreg_d, vreg_n, vtemp1);
                 break;
             case 0x0c: /* SQDMULH */
-                // TODO : need handle saturate
+                if (!is_scalar && is_q) {
+                    vreg_d = alloc_fpr_dst(rd);
+                    if (size == 1)
+                        la_vreplvei_h(vtemp1, vreg_m, index);
+                    else if (size == 2)
+                        la_vreplvei_w(vtemp1, vreg_m, index);
+                    else
+                        g_assert_not_reached();
+                    gen_sqdmulh_vec_q(vreg_d, vreg_n, vtemp1,
+                        vtemp, vzero, vtemp1, size, false);
+                    break;
+                }
                 vreg_d = alloc_fpr_src(rd);
                 switch (size) {
                     case 1:
@@ -19174,6 +19459,17 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                 break;
             case 0x0d: /* SQRDMULH — rounding variant of SQDMULH */
                 vreg_d = alloc_fpr_dst(rd);
+                if (!is_scalar && is_q) {
+                    if (size == 1)
+                        la_vreplvei_h(vtemp1, vreg_m, index);
+                    else if (size == 2)
+                        la_vreplvei_w(vtemp1, vreg_m, index);
+                    else
+                        g_assert_not_reached();
+                    gen_sqdmulh_vec_q(vreg_d, vreg_n, vtemp1,
+                        vtemp, vzero, vtemp1, size, true);
+                    break;
+                }
                 switch (size) {
                     case 1:
                         la_vreplvei_h(vtemp1, vreg_m, index);
@@ -19272,6 +19568,8 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                             case 1:
                                 la_vreplvei_h(vtemp1, vreg_m, index);
                                 la_vilvl_h(vtemp, vzero, vreg_n);
+                                la_vslli_w(vtemp, vtemp, 16);
+                                la_vsrai_w(vtemp, vtemp, 16);
 
                                 if (is_sub) {
                                     la_vmulwev_w_h(vzero, vtemp, vtemp1);
@@ -19282,6 +19580,8 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                             case 2:
                                 la_vreplvei_w(vtemp1, vreg_m, index);
                                 la_vilvl_w(vtemp, vzero, vreg_n);
+                                la_vslli_d(vtemp, vtemp, 32);
+                                la_vsrai_d(vtemp, vtemp, 32);
 
                                 if (is_sub) {
                                     la_vmulwev_d_w(vzero, vtemp, vtemp1);
@@ -19297,6 +19597,8 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                             case 1:
                                 la_vreplvei_h(vtemp1, vreg_m, index);
                                 la_vilvh_h(vtemp, vzero, vreg_n);
+                                la_vslli_w(vtemp, vtemp, 16);
+                                la_vsrai_w(vtemp, vtemp, 16);
 
                                 if (is_sub) {
                                     la_vmulwev_w_h(vzero, vtemp, vtemp1);
@@ -19307,6 +19609,8 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                             case 2:
                                 la_vreplvei_w(vtemp1, vreg_m, index);
                                 la_vilvh_w(vtemp, vzero, vreg_n);
+                                la_vslli_d(vtemp, vtemp, 32);
+                                la_vsrai_d(vtemp, vtemp, 32);
 
                                 if (is_sub) {
                                     la_vmulwev_d_w(vzero, vtemp, vtemp1);
@@ -19323,35 +19627,16 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
             case 0x0a: /* SMULL, SMULL2 */
             case 0x1a: /* UMULL, UMULL2 */
                 vreg_d = alloc_fpr_dst(rd);
-                if (!is_q) {
-                    /* low half */
-                    switch (size) {
-                        case 1:
-                            la_vreplvei_h(vtemp1, vreg_m, index);
-                            la_vilvl_h(vtemp, vzero, vreg_n);
-
-                            if (u)
-                                la_vmulwev_w_hu(vreg_d, vtemp, vtemp1);
-                            else
-                                la_vmulwev_w_h(vreg_d, vtemp, vtemp1);
-                            break;
-                        case 2:
-                            la_vreplvei_w(vtemp1, vreg_m, index);
-                            la_vilvl_w(vtemp, vzero, vreg_n);
-
-                            if (u)
-                                la_vmulwev_d_wu(vreg_d, vtemp, vtemp1);
-                            else
-                                la_vmulwev_d_w(vreg_d, vtemp, vtemp1);
-                            break;
-                    }
-                } else {
-                    /* high half */
+                /* is_q selects low/high source half; dest is always 128-bit. */
+                if (is_q) {
                     switch (size) {
                         case 1:
                             la_vreplvei_h(vtemp1, vreg_m, index);
                             la_vilvh_h(vtemp, vzero, vreg_n);
-
+                            if (!u) {
+                                la_vslli_w(vtemp, vtemp, 16);
+                                la_vsrai_w(vtemp, vtemp, 16);
+                            }
                             if (u)
                                 la_vmulwev_w_hu(vreg_d, vtemp, vtemp1);
                             else
@@ -19360,7 +19645,37 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                         case 2:
                             la_vreplvei_w(vtemp1, vreg_m, index);
                             la_vilvh_w(vtemp, vzero, vreg_n);
-
+                            if (!u) {
+                                la_vslli_d(vtemp, vtemp, 32);
+                                la_vsrai_d(vtemp, vtemp, 32);
+                            }
+                            if (u)
+                                la_vmulwev_d_wu(vreg_d, vtemp, vtemp1);
+                            else
+                                la_vmulwev_d_w(vreg_d, vtemp, vtemp1);
+                            break;
+                    }
+                } else {
+                    switch (size) {
+                        case 1:
+                            la_vreplvei_h(vtemp1, vreg_m, index);
+                            la_vilvl_h(vtemp, vzero, vreg_n);
+                            if (!u) {
+                                la_vslli_w(vtemp, vtemp, 16);
+                                la_vsrai_w(vtemp, vtemp, 16);
+                            }
+                            if (u)
+                                la_vmulwev_w_hu(vreg_d, vtemp, vtemp1);
+                            else
+                                la_vmulwev_w_h(vreg_d, vtemp, vtemp1);
+                            break;
+                        case 2:
+                            la_vreplvei_w(vtemp1, vreg_m, index);
+                            la_vilvl_w(vtemp, vzero, vreg_n);
+                            if (!u) {
+                                la_vslli_d(vtemp, vtemp, 32);
+                                la_vsrai_d(vtemp, vtemp, 32);
+                            }
                             if (u)
                                 la_vmulwev_d_wu(vreg_d, vtemp, vtemp1);
                             else
@@ -19371,50 +19686,45 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                 break;
             case 0x0b: /* SQDMULL, SQDMULL2 */
                 vreg_d = alloc_fpr_dst(rd);
-                if (!is_q) {
-                    switch (size) {
-                        case 1:
-                            la_vreplvei_h(vtemp1, vreg_m, index);
-                            la_vilvl_h(vtemp, vzero, vreg_n);
-
-                            la_vmulwev_w_h(vreg_d, vtemp, vtemp1);
-                            la_vsadd_w(vreg_d, vreg_d, vreg_d);
-                            break;
-                        case 2:
-                            la_vreplvei_w(vtemp1, vreg_m, index);
-                            la_vilvl_w(vtemp, vzero, vreg_n);
-
-                            la_vmulwev_d_w(vreg_d, vtemp, vtemp1);
-                            la_vsadd_d(vreg_d, vreg_d, vreg_d);
-                            break;
-                    }
-                } else {
-                    switch (size) {
-                        case 1:
-                            la_vreplvei_h(vtemp1, vreg_m, index);
+                /* SQDMULL2 (vector is_q=1): upper half. Scalar (is_scalar=1)
+                 * and SQDMULL (is_q=0): lower half. */
+                switch (size) {
+                    case 1:
+                        la_vreplvei_h(vtemp1, vreg_m, index);
+                        if (is_q && !is_scalar)
                             la_vilvh_h(vtemp, vzero, vreg_n);
+                        else
+                            la_vilvl_h(vtemp, vzero, vreg_n);
+                        la_vslli_w(vtemp, vtemp, 16);
+                        la_vsrai_w(vtemp, vtemp, 16);
 
-                            la_vmulwev_w_h(vreg_d, vtemp, vtemp1);
-                            la_vsadd_w(vreg_d, vreg_d, vreg_d);
-                            break;
-                        case 2:
-                            la_vreplvei_w(vtemp1, vreg_m, index);
+                        la_vmulwev_w_h(vreg_d, vtemp, vtemp1);
+                        la_vsadd_w(vreg_d, vreg_d, vreg_d);
+                        break;
+                    case 2:
+                        la_vreplvei_w(vtemp1, vreg_m, index);
+                        if (is_q && !is_scalar)
                             la_vilvh_w(vtemp, vzero, vreg_n);
+                        else
+                            la_vilvl_w(vtemp, vzero, vreg_n);
+                        la_vslli_d(vtemp, vtemp, 32);
+                        la_vsrai_d(vtemp, vtemp, 32);
 
-                            la_vmulwev_d_w(vreg_d, vtemp, vtemp1);
-                            la_vsadd_d(vreg_d, vreg_d, vreg_d);
-                            break;
-                    }
+                        la_vmulwev_d_w(vreg_d, vtemp, vtemp1);
+                        la_vsadd_d(vreg_d, vreg_d, vreg_d);
+                        break;
                 }
                 break;
             case 0x3: /* SQDMLAL, SQDMLAL2 */
             case 0x7: /* SQDMLSL, SQDMLSL2 */
                 vreg_d = alloc_fpr_src(rd);
-                if (!is_q) {
+                if (!is_q || is_scalar) {
                     switch (size) {
                         case 1:
                             la_vreplvei_h(vtemp1, vreg_m, index);
                             la_vilvl_h(vtemp, vzero, vreg_n);
+                            la_vslli_w(vtemp, vtemp, 16);
+                            la_vsrai_w(vtemp, vtemp, 16);
 
                             la_vmulwev_w_h(vtemp, vtemp, vtemp1);
                             la_vsadd_w(vtemp, vtemp, vtemp);
@@ -19426,6 +19736,8 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                         case 2:
                             la_vreplvei_w(vtemp1, vreg_m, index);
                             la_vilvl_w(vtemp, vzero, vreg_n);
+                            la_vslli_d(vtemp, vtemp, 32);
+                            la_vsrai_d(vtemp, vtemp, 32);
 
                             la_vmulwev_d_w(vtemp, vtemp, vtemp1);
                             la_vsadd_d(vtemp, vtemp, vtemp);
@@ -19440,6 +19752,8 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                         case 1:
                             la_vreplvei_h(vtemp1, vreg_m, index);
                             la_vilvh_h(vtemp, vzero, vreg_n);
+                            la_vslli_w(vtemp, vtemp, 16);
+                            la_vsrai_w(vtemp, vtemp, 16);
 
                             la_vmulwev_w_h(vtemp, vtemp, vtemp1);
                             la_vsadd_w(vtemp, vtemp, vtemp);
@@ -19451,6 +19765,8 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
                         case 2:
                             la_vreplvei_w(vtemp1, vreg_m, index);
                             la_vilvh_w(vtemp, vzero, vreg_n);
+                            la_vslli_d(vtemp, vtemp, 32);
+                            la_vsrai_d(vtemp, vtemp, 32);
 
                             la_vmulwev_d_w(vtemp, vtemp, vtemp1);
                             la_vsadd_d(vtemp, vtemp, vtemp);
@@ -19467,8 +19783,8 @@ static void disas_simd_indexed(DisasContext* s, uint32_t insn)
         }
     }
 do_gvec_end:
-    if (!is_q) {
-        /* 高64位清零 */
+    if (!is_q && !is_long) {
+        /* 高64位清零 (long ops always write full 128-bit dest) */
         la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
     }
     store_fpr_dst(rd, vreg_d);
