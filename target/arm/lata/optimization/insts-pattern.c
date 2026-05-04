@@ -102,6 +102,7 @@ static void pattern_goto_tb(DisasContext *s, int n, int64_t diff)
     ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, 1);
     la_b(ir2_opnd_addr); // nop
 
+    try_free_itemp(la_a0);  // ensure a0 not held by temp pool
     li_d(a0_ir2_opnd, s->pc_curr + diff + 4);
     la_st_d(a0_ir2_opnd, env_ir2_opnd, env_offset_pc());
 

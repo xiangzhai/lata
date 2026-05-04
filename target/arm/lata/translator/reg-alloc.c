@@ -179,11 +179,7 @@ const int reg_itemp_map[] = {
     REG_MAP_DEF(ITEMP3, la_t3),
     REG_MAP_DEF(ITEMP4, la_t4),
     REG_MAP_DEF(ITEMP5, la_t5),
-    // REG_MAP_DEF(ITEMP6, la_t6),
-    // REG_MAP_DEF(ITEMP7, la_t7),
-    // REG_MAP_DEF(ITEMP8, la_t8),
-    // REG_MAP_DEF(ITEMP9, la_ra),
-    // REG_MAP_DEF(ITEMP10, la_a7),
+    REG_MAP_DEF(ITEMP6, la_a0),  // a0 only used for goto_tb at block end
 };
 
 const int reg_itemp_reverse_map[32] = {
@@ -194,11 +190,7 @@ const int reg_itemp_reverse_map[32] = {
     REG_MAP_DEF(la_t3, ITEMP3),
     REG_MAP_DEF(la_t4, ITEMP4),
     REG_MAP_DEF(la_t5, ITEMP5),
-    // REG_MAP_DEF(la_t6, ITEMP6),
-    // REG_MAP_DEF(la_t7, ITEMP7),
-    // REG_MAP_DEF(la_t8, ITEMP8),
-    // REG_MAP_DEF(la_ra, ITEMP9),
-    // REG_MAP_DEF(la_a7, ITEMP10),
+    REG_MAP_DEF(la_a0, ITEMP6),
 };
 
 const int reg_ftemp_map[] = {
@@ -300,6 +292,16 @@ inline __attribute__((__always_inline__)) void ra_free_num_4095(IR2_OPND opnd)
 inline __attribute__((__always_inline__)) void ra_free_all(void)
 {
     lsenv->tr_data->all_temp_status = 0;
+}
+
+/* Safe free: only frees if the register is actually allocated as a temp.
+ * Used before direct register access (e.g., a0 for goto_tb). */
+inline __attribute__((__always_inline__)) void try_free_itemp(int phy_id)
+{
+    int virt_id = reg_itemp_reverse_map[phy_id];
+    if (virt_id >= 0) {
+        lsenv->tr_data->itemp_status &= ~(1 << virt_id);
+    }
 }
 
 /*

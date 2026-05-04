@@ -1049,40 +1049,19 @@ static bool trans_RET(DisasContext *s)
     return true;
 }
 
-static bool trans_BRAZ(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_BRAZ(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_BLRAZ(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_BLRAZ(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_RETA(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_RETA(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_BRA(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_BRA(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_BLRA(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_BLRA(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_ERET(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_ERET(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_ERETA(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_ERETA(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
 static bool trans_NOP(DisasContext *s)
 {
@@ -1215,10 +1194,7 @@ static bool trans_DSB_DMB(DisasContext *s)
     return true;
 }
 
-static bool trans_ISB(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_ISB(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
 static bool trans_SB(DisasContext *s)
 {
@@ -1235,65 +1211,29 @@ static bool trans_SB(DisasContext *s)
     return true;
 }
 
-static bool trans_CFINV(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_CFINV(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_XAFLAG(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_XAFLAG(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_AXFLAG(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_AXFLAG(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_MSR_i_UAO(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_MSR_i_UAO(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_MSR_i_PAN(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_MSR_i_PAN(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_MSR_i_SPSEL(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_MSR_i_SPSEL(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_MSR_i_SBSS(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_MSR_i_SBSS(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_MSR_i_DIT(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_MSR_i_DIT(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_MSR_i_TCO(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_MSR_i_TCO(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_MSR_i_DAIFSET(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_MSR_i_DAIFSET(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_MSR_i_DAIFCLEAR(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_MSR_i_DAIFCLEAR(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_MSR_i_SVCR(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_MSR_i_SVCR(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
 static void lata_helper_access_check_sysReg(DisasContext *ctx, void *la_ri, uint32_t key, uint32_t syndrome, uint32_t isread)
 {
@@ -1697,15 +1637,9 @@ static bool trans_SVC(DisasContext *s)
     return true;
 }
 
-static bool trans_HVC(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_HVC(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_SMC(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_SMC(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
 static bool trans_BRK(DisasContext *s)
 {
@@ -2158,20 +2092,11 @@ static bool trans_LDAR(DisasContext *s)
     return true;
 }
 
-static bool trans_STXP(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_STXP(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_LDXP(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDXP(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_CASP(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_CASP(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
 static bool trans_CAS(DisasContext *s)
 {
@@ -2809,10 +2734,7 @@ static bool trans_LDP_v(DisasContext *s)
     return true;
 }
 
-static bool trans_STGP(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_STGP(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
 static void assist_trans_STR_i(IR2_OPND *reg_t, IR2_OPND *reg_n, uint64_t offset, uint64_t sz)
 {
@@ -4211,10 +4133,7 @@ static bool trans_LDCLR(DisasContext *s)
     return true;
 }
 
-static bool trans_LDEOR(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDEOR(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
 static bool trans_LDSET(DisasContext *s)
 {
@@ -4372,25 +4291,13 @@ static bool trans_LDSET(DisasContext *s)
     return true;
 }
 
-static bool trans_LDSMAX(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDSMAX(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_LDSMIN(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDSMIN(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_LDUMAX(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDUMAX(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_LDUMIN(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDUMIN(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
 static bool trans_SWP(DisasContext *s)
 {
@@ -4540,25 +4447,13 @@ static bool trans_SWP(DisasContext *s)
     return true;
 }
 
-static bool trans_LDAPR(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDAPR(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_LDRA(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDRA(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_LDAPR_i(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDAPR_i(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_STLR_i(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_STLR_i(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
 static bool trans_LD_mult(DisasContext *s)
 {
@@ -5052,30 +4947,15 @@ static bool trans_LD_single_repl(DisasContext *s)
     return true;
 }
 
-static bool trans_STZGM(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_STZGM(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_STGM(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_STGM(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_LDGM(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDGM(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_LDG(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_LDG(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool do_STG(DisasContext *s, arg_ldst_tag *a, bool is_zero, bool is_pair)
-{
-    assert(0);
-}
+static bool do_STG(DisasContext *s, arg_ldst_tag *a, bool is_zero, bool is_pair) { lata_unallocated_encoding(s); return true; }
 
 TRANS_FEAT_LDST_TAG(STG, aa64_mte_insn_reg, do_STG, false, false)
 TRANS_FEAT_LDST_TAG(STZG, aa64_mte_insn_reg, do_STG, true, false)
@@ -5374,15 +5254,9 @@ static bool trans_SUBS_i(DisasContext *s)
 /*
  * Add/subtract (immediate, with tags)
  */
-static bool trans_ADDG_i(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_ADDG_i(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
-static bool trans_SUBG_i(DisasContext *s)
-{
-    assert(0);
-}
+static bool trans_SUBG_i(DisasContext *s) { lata_unallocated_encoding(s); return true; }
 
 /* The input should be a value in the bottom e bits (with higher
  * bits zero); returns that value replicated into every element
@@ -6888,10 +6762,7 @@ static void disas_adc_sbc(DisasContext *s, uint32_t insn)
  * |sf|op| S| 1 1 0 1 0 0 0 0 |  imm6  | 0 0 0 0 1 |  Rn  |o2| mask |
  * +--+--+--+-----------------+--------+-----------+------+--+------+
  */
-static void disas_rotate_right_into_flags(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_rotate_right_into_flags(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /*
  * Evaluate into flags
@@ -6900,10 +6771,7 @@ static void disas_rotate_right_into_flags(DisasContext *s, uint32_t insn)
  * |sf|op| S| 1 1 0 1 0 0 0 0 | opcode2 | sz | 0 0 1 0 |  Rn  |o3| mask |
  * +--+--+--+-----------------+---------+----+---------+------+--+------+
  */
-static void disas_evaluate_into_flags(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_evaluate_into_flags(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* Conditional compare (immediate / register)
  *  31 30 29 28 27 26 25 24 23 22 21  20    16 15  12  11  10  9   5  4 3   0
@@ -8113,10 +7981,7 @@ static void disas_fp_csel(DisasContext *s, uint32_t insn)
 }
 
 /* Floating-point data-processing (1 source) - half precision */
-static void handle_fp_1src_half(DisasContext *s, int opcode, int rd, int rn)
-{
-    assert(0);
-}
+static void handle_fp_1src_half(DisasContext *s, int opcode, int rd, int rn) { lata_unallocated_encoding(s); }
 
 /* Floating-point data-processing (1 source) - single precision */
 static void handle_fp_1src_single(DisasContext *s, int opcode, int rd, int rn)
@@ -8582,10 +8447,7 @@ static void handle_fp_2src_double(DisasContext *s, int opcode,
 
 /* Floating-point data-processing (2 source) - half precision */
 static void handle_fp_2src_half(DisasContext *s, int opcode,
-                                int rd, int rn, int rm)
-{
-    assert(0);
-}
+                                int rd, int rn, int rm) { lata_unallocated_encoding(s); }
 
 /* Floating point data-processing (2 source)
  *   31  30  29 28       24 23  22  21 20  16 15    12 11 10 9    5 4    0
@@ -8754,10 +8616,7 @@ static void handle_fp_3src_double(DisasContext *s, bool o0, bool o1,
 
 /* Floating-point data-processing (3 source) - half precision */
 static void handle_fp_3src_half(DisasContext *s, bool o0, bool o1,
-                                int rd, int rn, int rm, int ra)
-{
-    assert(0);
-}
+                                int rd, int rn, int rm, int ra) { lata_unallocated_encoding(s); }
 
 /* Floating point data-processing (3 source)
  *   31  30  29 28       24 23  22  21  20  16  15  14  10 9    5 4    0
@@ -9416,10 +9275,7 @@ static void handle_fmov(DisasContext *s, int rd, int rn, int type, bool itof)
     }
 }
 
-static void handle_fjcvtzs(DisasContext *s, int rd, int rn)
-{
-    assert(0);
-}
+static void handle_fjcvtzs(DisasContext *s, int rd, int rn) { lata_unallocated_encoding(s); }
 
 /* Floating point <-> integer conversions
  *   31   30  29 28       24 23  22  21 20   19 18 16 15         10 9  5 4  0
@@ -11250,10 +11106,7 @@ static void handle_vec_simd_sqshrn(DisasContext *s, bool is_scalar, bool is_q,
 /* SQSHLU, UQSHL, SQSHL: saturating left shifts */
 static void handle_simd_qshl(DisasContext *s, bool scalar, bool is_q,
                              bool src_unsigned, bool dst_unsigned,
-                             int immh, int immb, int rn, int rd)
-{
-    assert(0);
-}
+                             int immh, int immb, int rn, int rd) { lata_unallocated_encoding(s); }
 
 /* Common vector code for handling integer to FP conversion */
 static void handle_simd_intfp_conv(DisasContext *s, int rd, int rn,
@@ -11370,10 +11223,7 @@ static void handle_simd_shift_intfp_conv(DisasContext *s, bool is_scalar,
 /* FCVTZS, FVCVTZU - FP to fixedpoint conversion */
 static void handle_simd_shift_fpint_conv(DisasContext *s, bool is_scalar,
                                          bool is_q, bool is_u,
-                                         int immh, int immb, int rn, int rd)
-{
-    assert(0);
-}
+                                         int immh, int immb, int rn, int rd) { lata_unallocated_encoding(s); }
 
 /* AdvSIMD scalar shift by immediate
  *  31 30  29 28         23 22  19 18  16 15    11  10 9    5 4    0
@@ -11461,10 +11311,7 @@ static void disas_simd_scalar_shift_imm(DisasContext *s, uint32_t insn)
  * | 0 1 | U | 1 1 1 1 0 | size | 1 |  Rm  | opcode | 0 0 |  Rn  |  Rd  |
  * +-----+---+-----------+------+---+------+--------+-----+------+------+
  */
-static void disas_simd_scalar_three_reg_diff(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_simd_scalar_three_reg_diff(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 static void handle_3same_64(DisasContext *s, int opcode, bool u,
                             int rd, int rn, int rm)
@@ -11993,10 +11840,7 @@ static void disas_simd_scalar_three_reg_same(DisasContext *s, uint32_t insn)
  * m: 1101 1111 0110 0000 1100 0100 0000 0000 => df60c400
  */
 static void disas_simd_scalar_three_reg_same_fp16(DisasContext *s,
-                                                  uint32_t insn)
-{
-    assert(0);
-}
+                                                  uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* AdvSIMD scalar three same extra
  *  31 30  29 28       24 23  22  21 20  16  15 14    11  10 9  5 4  0
@@ -12005,10 +11849,7 @@ static void disas_simd_scalar_three_reg_same_fp16(DisasContext *s,
  * +-----+---+-----------+------+---+------+---+--------+---+----+----+
  */
 static void disas_simd_scalar_three_reg_same_extra(DisasContext *s,
-                                                   uint32_t insn)
-{
-    assert(0);
-}
+                                                   uint32_t insn) { lata_unallocated_encoding(s); }
 
 static void handle_2misc_64(DisasContext *s, int opcode, bool u,
                             IR2_OPND *vreg_d, IR2_OPND *vreg_n)
@@ -12212,10 +12053,7 @@ static void handle_2misc_fcmp_zero(DisasContext *s, int opcode,
 
 static void handle_2misc_reciprocal(DisasContext *s, int opcode,
                                     bool is_scalar, bool is_u, bool is_q,
-                                    int size, int rn, int rd)
-{
-    assert(0);
-}
+                                    int size, int rn, int rd) { lata_unallocated_encoding(s); }
 
 static void handle_fcvt(DisasContext *s, int opcode, bool is_u, int size,
                         int rn, int rd)
@@ -12487,10 +12325,7 @@ static void handle_2misc_narrow(DisasContext *s, bool scalar, int opcode,
 
 /* Remaining saturating accumulating ops */
 static void handle_2misc_satacc(DisasContext *s, bool is_scalar, bool is_u,
-                                bool is_q, int size, int rn, int rd)
-{
-    assert(0);
-}
+                                bool is_q, int size, int rn, int rd) { lata_unallocated_encoding(s); }
 
 /* AdvSIMD scalar two reg misc
  *  31 30  29 28       24 23  22 21       17 16    12 11 10 9    5 4    0
@@ -15317,10 +15152,7 @@ static void disas_simd_three_reg_same(DisasContext *s, uint32_t insn)
  * (register), FACGE, FABD, FCMGT (register) and FACGT.
  *
  */
-static void disas_simd_three_reg_same_fp16(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_simd_three_reg_same_fp16(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* AdvSIMD three same extra
  *  31   30  29 28       24 23  22  21 20  16  15 14    11  10 9  5 4  0
@@ -15328,10 +15160,7 @@ static void disas_simd_three_reg_same_fp16(DisasContext *s, uint32_t insn)
  * | 0 | Q | U | 0 1 1 1 0 | size | 0 |  Rm  | 1 | opcode | 1 | Rn | Rd |
  * +---+---+---+-----------+------+---+------+---+--------+---+----+----+
  */
-static void disas_simd_three_reg_same_extra(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_simd_three_reg_same_extra(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 static void handle_2misc_widening(DisasContext *s, int opcode, bool is_q,
                                   int size, int rn, int rd)
@@ -16245,10 +16074,7 @@ static void disas_simd_two_reg_misc(DisasContext *s, uint32_t insn)
  * in the vector form and are un-allocated for the scalar decode. Also
  * in the scalar decode Q is always 1.
  */
-static void disas_simd_two_reg_misc_fp16(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_simd_two_reg_misc_fp16(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* AdvSIMD scalar x indexed element
  *  31 30  29 28       24 23  22 21  20  19  16 15 12  11  10 9    5 4    0
@@ -16847,10 +16673,7 @@ do_gvec_end:
  * | 0 1 0 0 1 1 1 0 | size | 1 0 1 0 0 | opcode | 1 0 |  Rn  |  Rd  |
  * +-----------------+------+-----------+--------+-----+------+------+
  */
-static void disas_crypto_aes(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_crypto_aes(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* Crypto three-reg SHA
  *  31             24 23  22  21 20  16  15 14    12 11 10 9    5 4    0
@@ -16858,10 +16681,7 @@ static void disas_crypto_aes(DisasContext *s, uint32_t insn)
  * | 0 1 0 1 1 1 1 0 | size | 0 |  Rm  | 0 | opcode | 0 0 |  Rn  |  Rd  |
  * +-----------------+------+---+------+---+--------+-----+------+------+
  */
-static void disas_crypto_three_reg_sha(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_crypto_three_reg_sha(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* Crypto two-reg SHA
  *  31             24 23  22 21       17 16    12 11 10 9    5 4    0
@@ -16869,10 +16689,7 @@ static void disas_crypto_three_reg_sha(DisasContext *s, uint32_t insn)
  * | 0 1 0 1 1 1 1 0 | size | 1 0 1 0 0 | opcode | 1 0 |  Rn  |  Rd  |
  * +-----------------+------+-----------+--------+-----+------+------+
  */
-static void disas_crypto_two_reg_sha(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_crypto_two_reg_sha(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* Crypto three-reg SHA512
  *  31                   21 20  16 15  14  13 12  11  10  9    5 4    0
@@ -16880,10 +16697,7 @@ static void disas_crypto_two_reg_sha(DisasContext *s, uint32_t insn)
  * | 1 1 0 0 1 1 1 0 0 1 1 |  Rm  | 1 | O | 0 0 | opcode |  Rn  |  Rd  |
  * +-----------------------+------+---+---+-----+--------+------+------+
  */
-static void disas_crypto_three_reg_sha512(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_crypto_three_reg_sha512(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* Crypto two-reg SHA512
  *  31                                     12  11  10  9    5 4    0
@@ -16891,10 +16705,7 @@ static void disas_crypto_three_reg_sha512(DisasContext *s, uint32_t insn)
  * | 1 1 0 0 1 1 1 0 1 1 0 0 0 0 0 0 1 0 0 0 | opcode |  Rn  |  Rd  |
  * +-----------------------------------------+--------+------+------+
  */
-static void disas_crypto_two_reg_sha512(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_crypto_two_reg_sha512(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* Crypto four-register
  *  31               23 22 21 20  16 15  14  10 9    5 4    0
@@ -16902,10 +16713,7 @@ static void disas_crypto_two_reg_sha512(DisasContext *s, uint32_t insn)
  * | 1 1 0 0 1 1 1 0 0 | Op0 |  Rm  | 0 |  Ra  |  Rn  |  Rd  |
  * +-------------------+-----+------+---+------+------+------+
  */
-static void disas_crypto_four_reg(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_crypto_four_reg(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* Crypto XAR
  *  31                   21 20  16 15    10 9    5 4    0
@@ -16913,10 +16721,7 @@ static void disas_crypto_four_reg(DisasContext *s, uint32_t insn)
  * | 1 1 0 0 1 1 1 0 1 0 0 |  Rm  |  imm6  |  Rn  |  Rd  |
  * +-----------------------+------+--------+------+------+
  */
-static void disas_crypto_xar(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_crypto_xar(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* Crypto three-reg imm2
  *  31                   21 20  16 15  14 13 12  11  10  9    5 4    0
@@ -16924,10 +16729,7 @@ static void disas_crypto_xar(DisasContext *s, uint32_t insn)
  * | 1 1 0 0 1 1 1 0 0 1 0 |  Rm  | 1 0 | imm2 | opcode |  Rn  |  Rd  |
  * +-----------------------+------+-----+------+--------+------+------+
  */
-static void disas_crypto_three_reg_imm2(DisasContext *s, uint32_t insn)
-{
-    assert(0);
-}
+static void disas_crypto_three_reg_imm2(DisasContext *s, uint32_t insn) { lata_unallocated_encoding(s); }
 
 /* C3.6 Data processing - SIMD, inc Crypto
  *
