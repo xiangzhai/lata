@@ -309,6 +309,7 @@ typedef arg_decode_insn3215 arg_SB;
 typedef arg_decode_insn3215 arg_CFINV;
 typedef arg_decode_insn3215 arg_XAFLAG;
 typedef arg_decode_insn3215 arg_AXFLAG;
+typedef arg_decode_insn3215 arg_RMIF;
 typedef arg_i arg_MSR_i_UAO;
 typedef arg_i arg_MSR_i_PAN;
 typedef arg_i arg_MSR_i_SPSEL;

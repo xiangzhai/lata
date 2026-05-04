@@ -692,9 +692,14 @@ static bool decode_insn32(DisasContext *ctx, uint32_t insn)
                 /* ../target/arm/tcg/a64.decode:303 */
                 ctx->arg.f_ldstpair.sign = 0;
                 ctx->arg.f_ldstpair.w = 0;
-                ctx->arg.f_ldstpair.sz = 3;
                 ctx->arg.f_ldstpair.p = 0;
-                ctx->insn_type = AARCH64_A64_STP;
+                if (insn & (1 << 26)) {
+                    ctx->arg.f_ldstpair.sz = 4;
+                    ctx->insn_type = AARCH64_A64_STP_v;
+                } else {
+                    ctx->arg.f_ldstpair.sz = 3;
+                    ctx->insn_type = AARCH64_A64_STP;
+                }
                 return true;
                 break;
             case 0x80400000u:
@@ -702,9 +707,14 @@ static bool decode_insn32(DisasContext *ctx, uint32_t insn)
                 /* ../target/arm/tcg/a64.decode:304 */
                 ctx->arg.f_ldstpair.sign = 0;
                 ctx->arg.f_ldstpair.w = 0;
-                ctx->arg.f_ldstpair.sz = 3;
                 ctx->arg.f_ldstpair.p = 0;
-                ctx->insn_type = AARCH64_A64_LDP;
+                if (insn & (1 << 26)) {
+                    ctx->arg.f_ldstpair.sz = 4;
+                    ctx->insn_type = AARCH64_A64_LDP_v;
+                } else {
+                    ctx->arg.f_ldstpair.sz = 3;
+                    ctx->insn_type = AARCH64_A64_LDP;
+                }
                 return true;
                 break;
             }

@@ -636,6 +636,38 @@ void lata_gen_call_helper_prologue(TCGContext *tcg_ctx)
     la_bstrins_d(t1_ir2_opnd, t0_ir2_opnd, 23, 22);
     la_stx_w(t1_ir2_opnd, env_ir2_opnd, t2_ir2_opnd);
 
+    /* Accumulate FCSR0 exception flags (bits 20:16) → float_exception_flags.
+     * LA64 FCSR FLAGS field (5-bit, FCSR[20:16]):
+     *   bit4=INVALID, bit3=DIV0, bit2=OVERFLOW, bit1=UNDERFLOW, bit0=INEXACT
+     * ARM softfloat flags:
+     *   bit0=invalid, bit1=divbyzero, bit2=overflow, bit3=underflow, bit4=inexact
+     * These are bit-reversed: LA64[4]→ARM[0], LA64[3]→ARM[1],
+     *   LA64[2]→ARM[2], LA64[1]→ARM[3], LA64[0]→ARM[4].
+     * Build ARM flags: (t0&16)>>4 | (t0&8)>>1 | (t0&4) | (t0&2)<<1 | (t0&1)<<4
+     * Simplifies to: (t0&16)>>4 + (t0&8)>>2 + (t0&4) + (t0&2)<<2 + (t0&1)<<4
+     * Controlled by -fp_precise option (default: enabled). */
+    la_movfcsr2gr(t0_ir2_opnd, fcsr_ir2_opnd);
+    la_bstrpick_d(t0_ir2_opnd, t0_ir2_opnd, 20, 16);  /* t0 = LA64 FLAGS[4:0] */
+    /* Extract each bit and place at ARM position */
+    la_srli_d(t1_ir2_opnd, t0_ir2_opnd, 4);            /* LA64[4]→ARM[0] */
+    la_andi(t1_ir2_opnd, t1_ir2_opnd, 1);
+    la_srli_d(t2_ir2_opnd, t0_ir2_opnd, 2);
+    la_andi(t2_ir2_opnd, t2_ir2_opnd, 2);              /* LA64[3]→ARM[1] */
+    la_or(t1_ir2_opnd, t1_ir2_opnd, t2_ir2_opnd);
+    la_andi(t2_ir2_opnd, t0_ir2_opnd, 4);              /* LA64[2]→ARM[2] */
+    la_or(t1_ir2_opnd, t1_ir2_opnd, t2_ir2_opnd);
+    la_slli_d(t2_ir2_opnd, t0_ir2_opnd, 2);
+    la_andi(t2_ir2_opnd, t2_ir2_opnd, 8);              /* LA64[1]→ARM[3] */
+    la_or(t1_ir2_opnd, t1_ir2_opnd, t2_ir2_opnd);
+    la_slli_d(t2_ir2_opnd, t0_ir2_opnd, 4);
+    la_andi(t2_ir2_opnd, t2_ir2_opnd, 16);             /* LA64[0]→ARM[4] */
+    la_or(t1_ir2_opnd, t1_ir2_opnd, t2_ir2_opnd);
+    /* Accumulate: float_exception_flags |= t1 */
+    li_d(t2_ir2_opnd, env_offset_fpstatus() + offsetof(float_status, float_exception_flags));
+    la_ldx_w(t0_ir2_opnd, env_ir2_opnd, t2_ir2_opnd);
+    la_or(t0_ir2_opnd, t0_ir2_opnd, t1_ir2_opnd);
+    la_stx_w(t0_ir2_opnd, env_ir2_opnd, t2_ir2_opnd);
+
     /* clear fcsr */
     la_movgr2fcsr(fcsr_ir2_opnd, zero_ir2_opnd);
 }
