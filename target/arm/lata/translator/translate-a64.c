@@ -269,6 +269,13 @@ static void lata_clean_data_tbi(DisasContext* s, IR2_OPND* dst, IR2_OPND* src, i
     }
 }
 
+static void lata_compute_reg_offset_addr(IR2_OPND dst, IR2_OPND base,
+                                         IR2_OPND offset)
+{
+    la_add_d(dst, base, offset);
+    la_bstrpick_d(dst, dst, 47, 0);
+}
+
 
 // check saturate
 static inline void gen_sat_q(IR2_OPND vreg, int size, int is_u)
@@ -3853,30 +3860,31 @@ static bool trans_LDR(DisasContext* s)
 
     /* LDR(register), */
     if (extsize == 3 && !shift) {
+        lata_compute_reg_offset_addr(temp, reg_n, reg_m);
         switch (a->sz) {
             case 0:
                 if (a->sign) { // LDRSB
-                    la_ldx_b(reg_t, reg_n, reg_m);
+                    la_ld_b(reg_t, temp, 0);
                 } else { // LDRB
-                    la_ldx_bu(reg_t, reg_n, reg_m);
+                    la_ld_bu(reg_t, temp, 0);
                 }
                 break;
             case 1:
                 if (a->sign) { // LDRSH
-                    la_ldx_h(reg_t, reg_n, reg_m);
+                    la_ld_h(reg_t, temp, 0);
                 } else { // LDRH
-                    la_ldx_hu(reg_t, reg_n, reg_m);
+                    la_ld_hu(reg_t, temp, 0);
                 }
                 break;
             case 2:
                 if (a->sign) { // LDRSW
-                    la_ldx_w(reg_t, reg_n, reg_m);
+                    la_ld_w(reg_t, temp, 0);
                 } else { // LDR
-                    la_ldx_wu(reg_t, reg_n, reg_m);
+                    la_ld_wu(reg_t, temp, 0);
                 }
                 break;
             case 3: // LDR
-                la_ldx_d(reg_t, reg_n, reg_m);
+                la_ld_d(reg_t, temp, 0);
                 break;
             default:
                 break;
@@ -3890,30 +3898,31 @@ static bool trans_LDR(DisasContext* s)
             }
         }
 
+        lata_compute_reg_offset_addr(temp, reg_n, temp);
         switch (a->sz) {
             case 0:
                 if (a->sign) { // LDRSB
-                    la_ldx_b(reg_t, reg_n, temp);
+                    la_ld_b(reg_t, temp, 0);
                 } else { // LDRB
-                    la_ldx_bu(reg_t, reg_n, temp);
+                    la_ld_bu(reg_t, temp, 0);
                 }
                 break;
             case 1:
                 if (a->sign) { // LDRSH
-                    la_ldx_h(reg_t, reg_n, temp);
+                    la_ld_h(reg_t, temp, 0);
                 } else { // LDRH
-                    la_ldx_hu(reg_t, reg_n, temp);
+                    la_ld_hu(reg_t, temp, 0);
                 }
                 break;
             case 2:
                 if (a->sign) { // LDRSW
-                    la_ldx_w(reg_t, reg_n, temp);
+                    la_ld_w(reg_t, temp, 0);
                 } else { // LDR
-                    la_ldx_wu(reg_t, reg_n, temp);
+                    la_ld_wu(reg_t, temp, 0);
                 }
                 break;
             case 3: // LDR
-                la_ldx_d(reg_t, reg_n, temp);
+                la_ld_d(reg_t, temp, 0);
                 break;
             default:
                 break;
@@ -4013,18 +4022,19 @@ static bool trans_STR(DisasContext* s)
     }
 
     if (extsize == 3 && !shift) {
+        lata_compute_reg_offset_addr(temp, reg_n, reg_m);
         switch (a->sz) {
             case 0:
-                la_stx_b(reg_t, reg_n, reg_m);
+                la_st_b(reg_t, temp, 0);
                 break;
             case 1:
-                la_stx_h(reg_t, reg_n, reg_m);
+                la_st_h(reg_t, temp, 0);
                 break;
             case 2:
-                la_stx_w(reg_t, reg_n, reg_m);
+                la_st_w(reg_t, temp, 0);
                 break;
             case 3:
-                la_stx_d(reg_t, reg_n, reg_m);
+                la_st_d(reg_t, temp, 0);
                 break;
             default:
                 break;
@@ -4038,18 +4048,19 @@ static bool trans_STR(DisasContext* s)
             }
         }
 
+        lata_compute_reg_offset_addr(temp, reg_n, temp);
         switch (a->sz) {
             case 0:
-                la_stx_b(reg_t, reg_n, temp);
+                la_st_b(reg_t, temp, 0);
                 break;
             case 1:
-                la_stx_h(reg_t, reg_n, temp);
+                la_st_h(reg_t, temp, 0);
                 break;
             case 2:
-                la_stx_w(reg_t, reg_n, temp);
+                la_st_w(reg_t, temp, 0);
                 break;
             case 3:
-                la_stx_d(reg_t, reg_n, temp);
+                la_st_d(reg_t, temp, 0);
                 break;
             default:
                 break;
@@ -4127,28 +4138,29 @@ static bool trans_LDR_v(DisasContext* s)
 
     /* LDR(register), */
     if (extsize == 3 && !shift) {
+        lata_compute_reg_offset_addr(temp, reg_n, reg_m);
         switch (a->sz) {
             case 0:
                 la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ldx_bu(temp, reg_n, reg_m);
+                la_ld_bu(temp, temp, 0);
                 la_vinsgr2vr_b(vreg_t, temp, 0);
                 break;
             case 1:
                 la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ldx_hu(temp, reg_n, reg_m);
+                la_ld_hu(temp, temp, 0);
                 la_vinsgr2vr_h(vreg_t, temp, 0);
                 break;
             case 2:
                 la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ldx_wu(temp, reg_n, reg_m);
+                la_ld_wu(temp, temp, 0);
                 la_vinsgr2vr_w(vreg_t, temp, 0);
                 break;
             case 3:
-                la_fldx_d(vreg_t, reg_n, reg_m);
+                la_fld_d(vreg_t, temp, 0);
                 la_vinsgr2vr_d(vreg_t, zero_ir2_opnd, 1);
                 break;
             case 4:
-                la_vldx(vreg_t, reg_n, reg_m);
+                la_vld(vreg_t, temp, 0);
                 break;
             default:
                 break;
@@ -4163,28 +4175,29 @@ static bool trans_LDR_v(DisasContext* s)
         }
 
         /* LDR(register), */
+        lata_compute_reg_offset_addr(temp, reg_n, temp);
         switch (a->sz) {
             case 0:
                 la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ldx_bu(temp, reg_n, temp);
+                la_ld_bu(temp, temp, 0);
                 la_vinsgr2vr_b(vreg_t, temp, 0);
                 break;
             case 1:
                 la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ldx_hu(temp, reg_n, temp);
+                la_ld_hu(temp, temp, 0);
                 la_vinsgr2vr_h(vreg_t, temp, 0);
                 break;
             case 2:
                 la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ldx_wu(temp, reg_n, temp);
+                la_ld_wu(temp, temp, 0);
                 la_vinsgr2vr_w(vreg_t, temp, 0);
                 break;
             case 3:
-                la_fldx_d(vreg_t, reg_n, temp);
+                la_fld_d(vreg_t, temp, 0);
                 la_vinsgr2vr_d(vreg_t, zero_ir2_opnd, 1);
                 break;
             case 4:
-                la_vldx(vreg_t, reg_n, temp);
+                la_vld(vreg_t, temp, 0);
                 break;
             default:
                 break;
@@ -4262,23 +4275,24 @@ static bool trans_STR_v(DisasContext* s)
     }
 
     if (extsize == 3 && !shift) {
+        lata_compute_reg_offset_addr(temp, reg_n, reg_m);
         switch (a->sz) {
             case 0:
                 la_vpickve2gr_bu(temp1, vreg_t, 0);
-                la_stx_b(temp1, reg_n, reg_m);
+                la_st_b(temp1, temp, 0);
                 break;
             case 1:
                 la_vpickve2gr_hu(temp1, vreg_t, 0);
-                la_stx_h(temp1, reg_n, reg_m);
+                la_st_h(temp1, temp, 0);
                 break;
             case 2:
-                la_fstx_s(vreg_t, reg_n, reg_m);
+                la_fst_s(vreg_t, temp, 0);
                 break;
             case 3:
-                la_fstx_d(vreg_t, reg_n, reg_m);
+                la_fst_d(vreg_t, temp, 0);
                 break;
             case 4:
-                la_vstx(vreg_t, reg_n, reg_m);
+                la_vst(vreg_t, temp, 0);
                 break;
             default:
                 break;
@@ -4292,23 +4306,24 @@ static bool trans_STR_v(DisasContext* s)
             }
         }
 
+        lata_compute_reg_offset_addr(temp, reg_n, temp);
         switch (a->sz) {
             case 0:
                 la_vpickve2gr_bu(temp1, vreg_t, 0);
-                la_stx_b(temp1, reg_n, temp);
+                la_st_b(temp1, temp, 0);
                 break;
             case 1:
                 la_vpickve2gr_hu(temp1, vreg_t, 0);
-                la_stx_h(temp1, reg_n, temp);
+                la_st_h(temp1, temp, 0);
                 break;
             case 2:
-                la_fstx_s(vreg_t, reg_n, temp);
+                la_fst_s(vreg_t, temp, 0);
                 break;
             case 3:
-                la_fstx_d(vreg_t, reg_n, temp);
+                la_fst_d(vreg_t, temp, 0);
                 break;
             case 4:
-                la_vstx(vreg_t, reg_n, temp);
+                la_vst(vreg_t, temp, 0);
                 break;
             default:
                 break;
