@@ -290,6 +290,7 @@ IR2_INST *la_ll_w(IR2_OPND rd, IR2_OPND rj, int imm_si14);
 IR2_INST *la_sc_w(IR2_OPND rd, IR2_OPND rj, int imm_si14);
 IR2_INST *la_ll_d(IR2_OPND rd, IR2_OPND rj, int imm_si14);
 IR2_INST *la_sc_d(IR2_OPND rd, IR2_OPND rj, int imm_si14);
+IR2_INST *la_sc_q(IR2_OPND rd, IR2_OPND rk, IR2_OPND rj);
 IR2_INST *la_ldptr_w(IR2_OPND rd, IR2_OPND rj, int imm_si14);
 IR2_INST *la_stptr_w(IR2_OPND rd, IR2_OPND rj, int imm_si14);
 IR2_INST *la_ldptr_d(IR2_OPND rd, IR2_OPND rj, int imm_si14);

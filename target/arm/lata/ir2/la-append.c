@@ -3415,6 +3415,18 @@ IR2_INST *la_sc_d(IR2_OPND rd, IR2_OPND rj, int imm_si14) {
     return pir2;
 }
 
+IR2_INST *la_sc_q(IR2_OPND rd, IR2_OPND rk, IR2_OPND rj) {
+    IR2_INST *pir2 = ir2_allocate();
+    pir2->_opcode = LISA_SC_Q;
+    pir2->op_count = 3;
+    pir2->_opnd[0] = rd;
+    pir2->_opnd[1] = rk;
+    pir2->_opnd[2] = rj;
+    ir2_append(pir2);
+    lsassertm(ir2_op_check(pir2), "Maybe you should check the type of operand");
+    return pir2;
+}
+
 IR2_INST *la_ldptr_w(IR2_OPND rd, IR2_OPND rj, int imm_si14) {
     assert(imm_si14 <= 0x3fff);
     IR2_INST *pir2 = ir2_allocate();
@@ -31736,4 +31748,3 @@ IR2_INST *la_xvpermi_q(IR2_OPND xd, IR2_OPND xj, int imm_ui8) {
     lsassertm(ir2_op_check(pir2), "Maybe you should check the type of operand");
     return pir2;
 }
-

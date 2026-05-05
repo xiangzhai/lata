@@ -88,6 +88,8 @@ void label_dispose(void);
 
 void lata_gen_call_helper_prologue(TCGContext *tcg_ctx);
 void lata_gen_call_helper_epilogue(TCGContext *tcg_ctx);
+void lata_gen_call_helper_prologue_no_flags(TCGContext *tcg_ctx);
+void lata_gen_call_helper_epilogue_no_flags(TCGContext *tcg_ctx);
 
 IR2_OPND alloc_gpr_src(int i);
 IR2_OPND alloc_gpr_src_sp(int i);

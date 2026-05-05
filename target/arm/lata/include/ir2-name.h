@@ -288,6 +288,7 @@
 "sc.w",
 "ll.d",
 "sc.d",
+"sc.q",
 "ldptr.w",
 "stptr.w",
 "ldptr.d",

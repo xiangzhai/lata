@@ -754,6 +754,9 @@ void aarch64_max_tcg_initfn(Object *obj)
     t = FIELD_DP64(t, ID_AA64ISAR0, TS, 2);       /* FEAT_FlagM2 */
     t = FIELD_DP64(t, ID_AA64ISAR0, TLB, 2);      /* FEAT_TLBIRANGE */
     t = FIELD_DP64(t, ID_AA64ISAR0, RNDR, 1);     /* FEAT_RNG */
+#ifdef CONFIG_LATA
+    t = FIELD_DP64(t, ID_AA64ISAR0, RNDR, 0);
+#endif
     cpu->isar.id_aa64isar0 = t;
 
     t = cpu->isar.id_aa64isar1;
@@ -767,6 +770,10 @@ void aarch64_max_tcg_initfn(Object *obj)
     t = FIELD_DP64(t, ID_AA64ISAR1, BF16, 1);     /* FEAT_BF16 */
     t = FIELD_DP64(t, ID_AA64ISAR1, DGH, 1);      /* FEAT_DGH */
     t = FIELD_DP64(t, ID_AA64ISAR1, I8MM, 1);     /* FEAT_I8MM */
+#ifdef CONFIG_LATA
+    t = FIELD_DP64(t, ID_AA64ISAR1, BF16, 0);
+    t = FIELD_DP64(t, ID_AA64ISAR1, I8MM, 0);
+#endif
     cpu->isar.id_aa64isar1 = t;
 
     t = cpu->isar.id_aa64pfr0;

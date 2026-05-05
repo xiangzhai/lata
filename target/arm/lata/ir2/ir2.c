@@ -574,7 +574,7 @@ bool la_ir2_opcode_is_store(IR2_OPCODE opcode)
     if (opcode >= LISA_STL_W && opcode <= LISA_STR_D) {
         return true;
     }
-    if (opcode == LISA_SC_D || opcode == LISA_SC_W) {
+    if (opcode == LISA_SC_D || opcode == LISA_SC_W || opcode == LISA_SC_Q) {
         return true;
     }
     if (opcode == LISA_STPTR_W || opcode == LISA_STPTR_D) {

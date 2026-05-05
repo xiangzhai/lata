@@ -2412,6 +2412,59 @@ static bool ldst_iss_sf(int size, bool sign, bool ext)
     }
 }
 
+static void lata_load_gpr_by_size(IR2_OPND* reg_t, IR2_OPND* reg_n, int64_t offset,
+                                  uint64_t sz, uint64_t sign)
+{
+    switch (sz) {
+        case 0:
+            if (sign) {
+                la_ld_b(*reg_t, *reg_n, offset);
+            } else {
+                la_ld_bu(*reg_t, *reg_n, offset);
+            }
+            break;
+        case 1:
+            if (sign) {
+                la_ld_h(*reg_t, *reg_n, offset);
+            } else {
+                la_ld_hu(*reg_t, *reg_n, offset);
+            }
+            break;
+        case 2:
+            if (sign) {
+                la_ld_w(*reg_t, *reg_n, offset);
+            } else {
+                la_ld_wu(*reg_t, *reg_n, offset);
+            }
+            break;
+        case 3:
+            la_ld_d(*reg_t, *reg_n, offset);
+            break;
+        default:
+            assert(0);
+    }
+}
+
+static void lata_store_gpr_by_size(IR2_OPND* reg_t, IR2_OPND* reg_n, int64_t offset, uint64_t sz)
+{
+    switch (sz) {
+        case 0:
+            la_st_b(*reg_t, *reg_n, offset);
+            break;
+        case 1:
+            la_st_h(*reg_t, *reg_n, offset);
+            break;
+        case 2:
+            la_st_w(*reg_t, *reg_n, offset);
+            break;
+        case 3:
+            la_st_d(*reg_t, *reg_n, offset);
+            break;
+        default:
+            assert(0);
+    }
+}
+
 static void lata_load_exclusive(DisasContext* s, int rt, int rt2, int rn,
     int size, bool is_pair)
 {
@@ -2802,7 +2855,124 @@ static bool trans_LDXP(DisasContext* s)
 
 static bool trans_CASP(DisasContext* s)
 {
-    lata_unallocated_encoding(s);
+    int acquire = extract32(s->insn, 22, 1);
+    int release = extract32(s->insn, 15, 1);
+    arg_CAS* a = &(s->arg.f_decode_insn3221);
+
+    if (!dc_isar_feature(aa64_atomics, s)) {
+        return false;
+    }
+    if ((a->rs & 1) || (a->rt & 1) || a->sz < 2) {
+        lata_unallocated_encoding(s);
+        return true;
+    }
+
+    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
+    IR2_OPND cmp_lo_in = alloc_gpr_src(a->rs);
+    IR2_OPND cmp_hi_in = alloc_gpr_src(a->rs + 1);
+    IR2_OPND new_lo_in = alloc_gpr_src(a->rt);
+    IR2_OPND new_hi_in = alloc_gpr_src(a->rt + 1);
+    IR2_OPND cmp_lo = ra_alloc_itemp();
+    IR2_OPND cmp_hi = ra_alloc_itemp();
+    IR2_OPND new_lo = ra_alloc_itemp();
+    IR2_OPND new_hi = ra_alloc_itemp();
+    IR2_OPND old_lo = alloc_gpr_dst(a->rs);
+    IR2_OPND old_hi = alloc_gpr_dst(a->rs + 1);
+    IR2_OPND sc_lo = ra_alloc_itemp();
+    IR2_OPND sc_hi = ra_alloc_itemp();
+    IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND label_exit = ir2_opnd_new_type(IR2_OPND_LABEL);
+
+    if (a->rn == 31) {
+        gen_check_sp_alignment(s);
+    }
+
+    la_or(cmp_lo, cmp_lo_in, zero_ir2_opnd);
+    la_or(cmp_hi, cmp_hi_in, zero_ir2_opnd);
+    la_or(new_lo, new_lo_in, zero_ir2_opnd);
+    la_or(new_hi, new_hi_in, zero_ir2_opnd);
+
+    if (release) {
+        la_dbar(0);
+    }
+
+    if (a->sz == 3) {
+        /*
+         * CASP X uses one LL.D on the low half followed by SC.Q.  Per the
+         * LoongArch SC.Q definition, rd/rk provide the low/high 64-bit store
+         * data and rd is overwritten with the success flag, so both desired
+         * values must be copied to temporaries before the store-conditional.
+         * DBAR 0 around the LL/SC pair is conservative, but keeps the AArch64
+         * atomic ordering model correct while we expose FEAT_LSE.
+         */
+        la_label(label_ll);
+        la_dbar(0);
+        la_ll_d(old_lo, reg_n, 0);
+        la_ld_d(old_hi, reg_n, 8);
+        la_bne(old_lo, cmp_lo, label_exit);
+        la_bne(old_hi, cmp_hi, label_exit);
+        la_or(sc_lo, new_lo, zero_ir2_opnd);
+        la_or(sc_hi, new_hi, zero_ir2_opnd);
+        la_sc_q(sc_lo, sc_hi, reg_n);
+        la_beqz(sc_lo, label_ll);
+        la_dbar(0);
+    } else {
+        /*
+         * CASP W compares and replaces two adjacent 32-bit words atomically.
+         * Pack them into one 64-bit LL/SC word in little-endian order:
+         * low word at [addr], high word at [addr + 4].
+         */
+        la_bstrpick_d(cmp_lo, cmp_lo, 31, 0);
+        la_bstrpick_d(cmp_hi, cmp_hi, 31, 0);
+        la_slli_d(cmp_hi, cmp_hi, 32);
+        la_or(cmp_lo, cmp_lo, cmp_hi);
+
+        la_bstrpick_d(new_lo, new_lo, 31, 0);
+        la_bstrpick_d(new_hi, new_hi, 31, 0);
+        la_slli_d(new_hi, new_hi, 32);
+        la_or(new_lo, new_lo, new_hi);
+
+        la_label(label_ll);
+        la_dbar(0);
+        la_ll_d(old_lo, reg_n, 0);
+        la_bne(old_lo, cmp_lo, label_exit);
+        la_or(sc_lo, new_lo, zero_ir2_opnd);
+        la_sc_d(sc_lo, reg_n, 0);
+        la_beqz(sc_lo, label_ll);
+        la_dbar(0);
+        la_label(label_exit);
+        la_bstrpick_d(old_hi, old_lo, 63, 32);
+        la_bstrpick_d(old_lo, old_lo, 31, 0);
+        goto casp_done;
+    }
+
+    la_label(label_exit);
+
+casp_done:
+    if (acquire) {
+        la_dbar(0);
+    }
+
+    if (a->sz == 2) {
+        la_bstrpick_d(old_lo, old_lo, 31, 0);
+        la_bstrpick_d(old_hi, old_hi, 31, 0);
+    }
+
+    store_gpr_dst(a->rs, old_lo);
+    store_gpr_dst(a->rs + 1, old_hi);
+    free_alloc_gpr(reg_n);
+    free_alloc_gpr(cmp_lo_in);
+    free_alloc_gpr(cmp_hi_in);
+    free_alloc_gpr(new_lo_in);
+    free_alloc_gpr(new_hi_in);
+    free_alloc_gpr(cmp_lo);
+    free_alloc_gpr(cmp_hi);
+    free_alloc_gpr(new_lo);
+    free_alloc_gpr(new_hi);
+    free_alloc_gpr(old_lo);
+    free_alloc_gpr(old_hi);
+    free_alloc_gpr(sc_lo);
+    free_alloc_gpr(sc_hi);
     return true;
 }
 
@@ -2997,7 +3167,7 @@ static bool trans_STP(DisasContext* s)
      */
 
     arg_ldstpair* a = &(s->arg.f_ldstpair);
-    uint64_t offset = a->imm << a->sz;
+    int64_t offset = (int64_t)a->imm << a->sz;
     int dbytes = (8 << a->sz) / 8;
     if (a->w && (a->rt == a->rn || a->rt2 == a->rn) && a->rn != 31) {
         lata_unallocated_encoding(s);
@@ -3039,7 +3209,7 @@ static bool trans_STP(DisasContext* s)
                 lata_unallocated_encoding(s);
                 return true;
         }
-    } else { // Post-index
+    } else { // Pre-index or post-index
         if (!a->p && offset) {
             la_addi_d(reg_n, reg_n, offset);
         }
@@ -3083,7 +3253,7 @@ static bool trans_LDP(DisasContext* s)
      */
 
     arg_ldstpair* a = &(s->arg.f_ldstpair);
-    uint64_t offset = a->imm << a->sz;
+    int64_t offset = (int64_t)a->imm << a->sz;
     int dbytes = (8 << a->sz) / 8; // dbytes = datasize / 8;
     if (a->w && (a->rt == a->rn || a->rt2 == a->rn) && a->rn != 31) {
         lata_unallocated_encoding(s);
@@ -3122,7 +3292,7 @@ static bool trans_LDP(DisasContext* s)
                 lata_unallocated_encoding(s);
                 return true;
         }
-    } else { // Post-index
+    } else { // Pre-index or post-index
         if (!a->p && offset) {
             la_addi_d(reg_n, reg_n, offset);
         }
@@ -3207,7 +3377,7 @@ static bool trans_STP_v(DisasContext* s)
      */
 
     arg_ldstpair* a = &(s->arg.f_ldstpair);
-    uint64_t offset = a->imm << a->sz;
+    int64_t offset = (int64_t)a->imm << a->sz;
     int dbytes = (8 << a->sz) / 8; // dbytes = datasize / 8;
 
     /* TODO: CheckFPAdvSIMDEnabled64(s) */
@@ -3242,7 +3412,7 @@ static bool trans_STP_v(DisasContext* s)
                 lata_unallocated_encoding(s);
                 return true;
         }
-    } else { // Post-index
+    } else { // Pre-index or post-index
         if (!a->p && offset) {
             la_addi_d(reg_n, reg_n, offset);
         }
@@ -3289,7 +3459,7 @@ static bool trans_LDP_v(DisasContext* s)
      */
 
     arg_ldstpair* a = &(s->arg.f_ldstpair);
-    uint64_t offset = a->imm << a->sz;
+    int64_t offset = (int64_t)a->imm << a->sz;
     int dbytes = (8 << a->sz) / 8; // dbytes = datasize / 8;
     /* TODO: CheckFPAdvSIMDEnabled64(s) */
 
@@ -3325,7 +3495,7 @@ static bool trans_LDP_v(DisasContext* s)
                 lata_unallocated_encoding(s);
                 return true;
         }
-    } else { // Post-index
+    } else { // Pre-index or post-index
         if (!a->p && offset) {
             la_addi_d(reg_n, reg_n, offset);
         }
@@ -3391,24 +3561,9 @@ static bool trans_STGP(DisasContext* s)
     return true;
 }
 
-static void assist_trans_STR_i(IR2_OPND* reg_t, IR2_OPND* reg_n, uint64_t offset, uint64_t sz)
+static void assist_trans_STR_i(IR2_OPND* reg_t, IR2_OPND* reg_n, int64_t offset, uint64_t sz)
 {
-    switch (sz) {
-        case 0:
-            la_st_b(*reg_t, *reg_n, offset);
-            break;
-        case 1:
-            la_st_h(*reg_t, *reg_n, offset);
-            break;
-        case 2:
-            la_st_w(*reg_t, *reg_n, offset);
-            break;
-        case 3:
-            la_st_d(*reg_t, *reg_n, offset);
-            break;
-        default:
-            assert(0);
-    }
+    lata_store_gpr_by_size(reg_t, reg_n, offset, sz);
 }
 
 static bool trans_STR_i(DisasContext* s)
@@ -3486,36 +3641,9 @@ static bool trans_STR_i(DisasContext* s)
     return true;
 }
 
-static void assist_trans_LDR_i(IR2_OPND* reg_t, IR2_OPND* reg_n, uint64_t offset, uint64_t sz, uint64_t sign, bool iss_sf)
+static void assist_trans_LDR_i(IR2_OPND* reg_t, IR2_OPND* reg_n, int64_t offset, uint64_t sz, uint64_t sign, bool iss_sf)
 {
-    switch (sz) {
-        case 0:
-            if (sign) { // LDRSB_i
-                la_ld_b(*reg_t, *reg_n, offset);
-            } else { // LDRB_i
-                la_ld_bu(*reg_t, *reg_n, offset);
-            }
-            break;
-        case 1:
-            if (sign) { // LDRSH_i
-                la_ld_h(*reg_t, *reg_n, offset);
-            } else { // LDRH_i
-                la_ld_hu(*reg_t, *reg_n, offset);
-            }
-            break;
-        case 2:
-            if (sign) { // LDRSW_i
-                la_ld_w(*reg_t, *reg_n, offset);
-            } else { // LDR_i
-                la_ld_wu(*reg_t, *reg_n, offset);
-            }
-            break;
-        case 3: // LDR_i
-            la_ld_d(*reg_t, *reg_n, offset);
-            break;
-        default:
-            assert(0);
-    }
+    lata_load_gpr_by_size(reg_t, reg_n, offset, sz, sign);
 }
 
 static bool trans_LDR_i(DisasContext* s)
@@ -3608,7 +3736,7 @@ static bool trans_LDR_i(DisasContext* s)
     return true;
 }
 
-static void assist_trans_STR_v_i(IR2_OPND* vreg_t, IR2_OPND* reg_n, uint64_t offset, uint64_t sz)
+static void assist_trans_STR_v_i(IR2_OPND* vreg_t, IR2_OPND* reg_n, int64_t offset, uint64_t sz)
 {
     IR2_OPND temp = ra_alloc_itemp();
     switch (sz) {
@@ -3673,8 +3801,8 @@ static bool trans_STR_v_i(DisasContext* s)
             IR2_OPND temp = ra_alloc_itemp();
             li_d(temp, a->imm);
             la_add_d(temp, reg_n, temp);
-            free_alloc_gpr(temp);
             assist_trans_STR_v_i(&vreg_t, &temp, 0, a->sz);
+            free_alloc_gpr(temp);
         } else {
             // la_addi_d(temp, reg_n, a->imm);
             assist_trans_STR_v_i(&vreg_t, &reg_n, offset, a->sz);
@@ -3696,7 +3824,7 @@ static bool trans_STR_v_i(DisasContext* s)
     return true;
 }
 
-static void assist_trans_LDR_v_i(IR2_OPND* vreg_t, IR2_OPND* reg_n, uint64_t offset, uint64_t sz)
+static void assist_trans_LDR_v_i(IR2_OPND* vreg_t, IR2_OPND* reg_n, int64_t offset, uint64_t sz)
 {
     IR2_OPND temp = ra_alloc_itemp();
     switch (sz) {
@@ -4338,15 +4466,118 @@ static bool trans_STR_v(DisasContext* s)
     return true;
 }
 
-static bool trans_LDADD(DisasContext* s)
+typedef enum LATALseAtomicOp {
+    LATA_LSE_ADD,
+    LATA_LSE_CLR,
+    LATA_LSE_EOR,
+    LATA_LSE_SET,
+    LATA_LSE_SMAX,
+    LATA_LSE_SMIN,
+    LATA_LSE_UMAX,
+    LATA_LSE_UMIN,
+    LATA_LSE_SWP,
+} LATALseAtomicOp;
+
+static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
+    IR2_OPND input, IR2_OPND input_field, IR2_OPND new_field, int sz,
+    LATALseAtomicOp op)
+{
+    const int msb = sz == 1 ? 15 : 7;
+    const uint64_t field_mask = sz == 1 ? 0xffff : 0xff;
+    IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND label_done = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND offset = ra_alloc_itemp();
+    IR2_OPND aligned_addr = ra_alloc_itemp();
+    IR2_OPND word = ra_alloc_itemp();
+    IR2_OPND mask = ra_alloc_itemp();
+    IR2_OPND cmp_old = ra_alloc_itemp();
+    IR2_OPND cmp_input = ra_alloc_itemp();
+
+    la_label(label_ll);
+    la_bstrpick_d(input_field, input, msb, 0);
+    la_bstrpick_d(offset, addr, 2, 0);
+    la_or(aligned_addr, addr, zero_ir2_opnd);
+    la_bstrins_d(aligned_addr, zero_ir2_opnd, 2, 0);
+    la_ll_d(word, aligned_addr, 0);
+    la_slli_d(offset, offset, 3);
+
+    li_d(mask, field_mask);
+    la_sll_d(mask, mask, offset);
+    la_srl_d(old_field, word, offset);
+    la_bstrpick_d(old_field, old_field, msb, 0);
+
+    switch (op) {
+    case LATA_LSE_ADD:
+        la_add_d(new_field, old_field, input_field);
+        break;
+    case LATA_LSE_CLR:
+        la_andn(new_field, old_field, input_field);
+        break;
+    case LATA_LSE_EOR:
+        la_xor(new_field, old_field, input_field);
+        break;
+    case LATA_LSE_SET:
+        la_or(new_field, old_field, input_field);
+        break;
+    case LATA_LSE_SWP:
+        la_or(new_field, input_field, zero_ir2_opnd);
+        break;
+    case LATA_LSE_SMAX:
+    case LATA_LSE_SMIN:
+        if (sz == 1) {
+            la_ext_w_h(cmp_old, old_field);
+            la_ext_w_h(cmp_input, input_field);
+        } else {
+            la_ext_w_b(cmp_old, old_field);
+            la_ext_w_b(cmp_input, input_field);
+        }
+        la_or(new_field, input_field, zero_ir2_opnd);
+        if (op == LATA_LSE_SMAX) {
+            la_blt(cmp_old, cmp_input, label_done);
+        } else {
+            la_blt(cmp_input, cmp_old, label_done);
+        }
+        la_or(new_field, old_field, zero_ir2_opnd);
+        la_label(label_done);
+        break;
+    case LATA_LSE_UMAX:
+        la_or(new_field, input_field, zero_ir2_opnd);
+        la_bltu(old_field, input_field, label_done);
+        la_or(new_field, old_field, zero_ir2_opnd);
+        la_label(label_done);
+        break;
+    case LATA_LSE_UMIN:
+        la_or(new_field, input_field, zero_ir2_opnd);
+        la_bltu(input_field, old_field, label_done);
+        la_or(new_field, old_field, zero_ir2_opnd);
+        la_label(label_done);
+        break;
+    }
+
+    la_bstrpick_d(new_field, new_field, msb, 0);
+    la_andn(word, word, mask);
+    la_sll_d(new_field, new_field, offset);
+    la_or(word, word, new_field);
+    la_sc_d(word, aligned_addr, 0);
+    la_beqz(word, label_ll);
+
+    free_alloc_gpr(offset);
+    free_alloc_gpr(aligned_addr);
+    free_alloc_gpr(word);
+    free_alloc_gpr(mask);
+    free_alloc_gpr(cmp_old);
+    free_alloc_gpr(cmp_input);
+}
+
+static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
 {
     int acquire = extract32(s->insn, 23, 1);
     int release = extract32(s->insn, 22, 1);
 
     arg_atomic* a = &(s->arg.f_atomic);
     IR2_OPND reg_s = alloc_gpr_src(a->rs);
-    IR2_OPND reg_t = alloc_gpr_dst(a->rt);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
+    IR2_OPND reg_t = a->rt == 31 ? ra_alloc_itemp() : alloc_gpr_dst(a->rt);
+    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
     IR2_OPND src = ra_alloc_itemp();
     IR2_OPND dest = ra_alloc_itemp();
 
@@ -4359,572 +4590,140 @@ static bool trans_LDADD(DisasContext* s)
     }
 
     if (a->sz == 3) {
-        if (a->rt == a->rs || a->rt == a->rn) {
-            IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-            la_or(src, reg_s, zero_ir2_opnd);
-            la_label(label_ll);
-            la_ll_w(reg_t, reg_n, 0);
-            la_add_d(dest, src, reg_t);
-            la_sc_w(dest, reg_n, 0);
-            la_beqz(dest, label_ll);
-        } else {
-            la_amadd_d(reg_t, reg_s, reg_n);
+        la_or(src, reg_s, zero_ir2_opnd);
+        switch (op) {
+        case LATA_LSE_ADD: la_amadd_d(reg_t, src, reg_n); break;
+        case LATA_LSE_CLR:
+            la_orn(src, zero_ir2_opnd, src);
+            la_amand_d(reg_t, src, reg_n);
+            break;
+        case LATA_LSE_EOR: la_amxor_d(reg_t, src, reg_n); break;
+        case LATA_LSE_SET: la_amor_d(reg_t, src, reg_n); break;
+        case LATA_LSE_SMAX: la_ammax_d(reg_t, src, reg_n); break;
+        case LATA_LSE_SMIN: la_ammin_d(reg_t, src, reg_n); break;
+        case LATA_LSE_UMAX: la_ammax_du(reg_t, src, reg_n); break;
+        case LATA_LSE_UMIN: la_ammin_du(reg_t, src, reg_n); break;
+        case LATA_LSE_SWP: la_amswap_d(reg_t, src, reg_n); break;
         }
     } else if (a->sz == 2) {
-        if (a->rt == a->rs || a->rt == a->rn) {
-            IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-            la_bstrpick_d(src, reg_s, 31, 0);
-            la_label(label_ll);
-            la_ll_w(reg_t, reg_n, 0);
-            la_bstrpick_d(reg_t, reg_t, 31, 0);
-            la_add_w(dest, src, reg_t);
-            la_sc_w(dest, reg_n, 0);
-            la_beqz(dest, label_ll);
-        } else {
-            la_amadd_w(reg_t, reg_s, reg_n);
-            la_bstrpick_d(reg_t, reg_t, 31, 0);
+        la_bstrpick_d(src, reg_s, 31, 0);
+        switch (op) {
+        case LATA_LSE_ADD: la_amadd_w(reg_t, src, reg_n); break;
+        case LATA_LSE_CLR:
+            la_orn(src, zero_ir2_opnd, src);
+            la_amand_w(reg_t, src, reg_n);
+            break;
+        case LATA_LSE_EOR: la_amxor_w(reg_t, src, reg_n); break;
+        case LATA_LSE_SET: la_amor_w(reg_t, src, reg_n); break;
+        case LATA_LSE_SMAX: la_ammax_w(reg_t, src, reg_n); break;
+        case LATA_LSE_SMIN: la_ammin_w(reg_t, src, reg_n); break;
+        case LATA_LSE_UMAX: la_ammax_wu(reg_t, src, reg_n); break;
+        case LATA_LSE_UMIN: la_ammin_wu(reg_t, src, reg_n); break;
+        case LATA_LSE_SWP: la_amswap_w(reg_t, src, reg_n); break;
         }
-    } else if (a->sz == 1) {
-        IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND offset = ra_alloc_itemp();
-        IR2_OPND aligned_mem = ra_alloc_itemp();
-        /*  mov tmp1, ws
-            1:
-            ldxr wt, [xn]
-            add  tmp2, wt, tmp1
-            stxr tmp3, tmp2, [xn]
-            cbnz tmp3,1
-        */
-        // mov, dest can't be changed
-        la_bstrpick_d(dest, reg_s, 15, 0);
-
-        // ldxr wt, [xn]
-        la_label(label_ll);
-        la_bstrpick_d(offset, reg_n, 2, 0);
-        la_or(aligned_mem, reg_n, zero_ir2_opnd);
-        la_bstrins_d(aligned_mem, zero_ir2_opnd, 2, 0);
-        la_ll_d(reg_t, aligned_mem, 0);
-        la_slli_d(offset, offset, 3);
-
-        // add  tmp2, wt, tmp1
-        li_d(src, 0xffff);
-        la_sll_d(src, src, offset);
-        la_andn(src, reg_t, src);
-
-        la_srl_d(reg_t, reg_t, offset);
-        la_bstrpick_d(reg_t, reg_t, 15, 0);
-        la_add_d(dest, dest, reg_t);
-
-        la_sll_d(offset, dest, offset);
-        la_or(src, src, offset);
-        // dest recover
-        la_sub_d(dest, dest, reg_t);
-        // stxr tmp3, tmp2, [xn]
-        la_sc_d(src, aligned_mem, 0);
-
-        // cbnz tmp3,1
-        la_beqz(src, label_ll);
-
-        free_alloc_gpr(offset);
-        free_alloc_gpr(aligned_mem);
+        la_bstrpick_d(reg_t, reg_t, 31, 0);
     } else {
-        IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND offset = ra_alloc_itemp();
-        IR2_OPND aligned_mem = ra_alloc_itemp();
-        // mov, dest can't be changed
-        la_bstrpick_d(dest, reg_s, 7, 0);
-
-        // ldxr wt, [xn]
-        la_label(label_ll);
-        la_bstrpick_d(offset, reg_n, 2, 0);
-        la_or(aligned_mem, reg_n, zero_ir2_opnd);
-        la_bstrins_d(aligned_mem, zero_ir2_opnd, 2, 0);
-        la_ll_d(reg_t, aligned_mem, 0);
-        la_slli_d(offset, offset, 3);
-
-        // add  tmp2, wt, tmp1
-        li_d(src, 0xff);
-        la_sll_d(src, src, offset);
-        la_andn(src, reg_t, src);
-
-        la_srl_d(reg_t, reg_t, offset);
-        la_bstrpick_d(reg_t, reg_t, 7, 0);
-        la_add_d(dest, dest, reg_t);
-
-        la_sll_d(offset, dest, offset);
-        la_or(src, src, offset);
-        // dest recover
-        la_sub_d(dest, dest, reg_t);
-        // stxr tmp3, tmp2, [xn]
-        la_sc_d(src, aligned_mem, 0);
-
-        // cbnz tmp3,1
-        la_beqz(src, label_ll);
-
-        free_alloc_gpr(offset);
-        free_alloc_gpr(aligned_mem);
+        gen_lse_atomic_narrow_llsc(reg_t, reg_n, reg_s, src, dest, a->sz, op);
     }
 
     if (acquire) {
         la_dbar(0);
     }
 
-    store_gpr_dst(a->rt, reg_t);
+    if (a->rt != 31) {
+        store_gpr_dst(a->rt, reg_t);
+    }
     free_alloc_gpr(reg_s);
     free_alloc_gpr(reg_t);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(src);
     free_alloc_gpr(dest);
     return true;
+}
+
+static bool trans_LDADD(DisasContext* s)
+{
+    return do_lse_atomic(s, LATA_LSE_ADD);
 }
 
 static bool trans_LDCLR(DisasContext* s)
 {
-    int acquire = extract32(s->insn, 23, 1);
-    int release = extract32(s->insn, 22, 1);
-
-    arg_atomic* a = &(s->arg.f_atomic);
-    IR2_OPND reg_s = alloc_gpr_src(a->rs);
-    IR2_OPND reg_t = alloc_gpr_src(a->rt);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
-    IR2_OPND src = ra_alloc_itemp();
-    IR2_OPND dest = ra_alloc_itemp();
-
-    if (a->rn == 31) {
-        gen_check_sp_alignment(s);
-    }
-
-    if (release) {
-        la_dbar(0);
-    }
-
-    if (a->sz == 3) {
-        if (a->rt == a->rs || a->rt == a->rn) {
-            IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-            la_or(src, reg_s, zero_ir2_opnd);
-            la_label(label_ll);
-            la_ll_d(reg_t, reg_n, 0);
-            la_andn(dest, src, reg_t);
-            la_sc_d(dest, reg_n, 0);
-            la_beqz(dest, label_ll);
-        } else {
-            la_orn(src, zero_ir2_opnd, reg_s);
-            la_amand_d(reg_t, src, reg_n);
-        }
-    } else if (a->sz == 2) {
-        if (a->rt == a->rs || a->rt == a->rn) {
-            IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-            la_bstrpick_d(src, reg_s, 31, 0);
-            la_label(label_ll);
-            la_ll_w(reg_t, reg_n, 0);
-            la_bstrpick_d(reg_t, reg_t, 31, 0);
-            la_andn(dest, src, reg_t);
-            la_sc_w(dest, reg_n, 0);
-            la_beqz(dest, label_ll);
-        } else {
-            la_orn(src, zero_ir2_opnd, reg_s);
-            la_amand_w(reg_t, src, reg_n);
-            la_bstrpick_d(reg_t, reg_t, 31, 0);
-        }
-    } else if (a->sz == 1) {
-        IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND offset = ra_alloc_itemp();
-        IR2_OPND aligned_mem = ra_alloc_itemp();
-        /*  mov tmp1, ws
-            1:
-            ldxr wt, [xn]
-            bic  tmp2, wt, tmp1
-            stxr tmp3, tmp2, [xn]
-            cbnz tmp3,1
-        */
-        // mov, dest can't be changed
-        la_bstrpick_d(dest, reg_s, 15, 0);
-
-        // ldxr wt, [xn]
-        la_label(label_ll);
-        la_bstrpick_d(offset, reg_n, 2, 0);
-        la_or(aligned_mem, reg_n, zero_ir2_opnd);
-        la_bstrins_d(aligned_mem, zero_ir2_opnd, 2, 0);
-        la_ll_d(reg_t, aligned_mem, 0);
-        la_slli_d(offset, offset, 3);
-
-        // bic  tmp2, wt, tmp1
-        li_d(src, 0xffff);
-        la_sll_d(src, src, offset);
-        la_andn(src, reg_t, src);
-
-        la_srl_d(reg_t, reg_t, offset);
-        la_bstrpick_d(reg_t, reg_t, 15, 0);
-        la_andn(dest, reg_t, dest);
-
-        la_sll_d(offset, dest, offset);
-        la_or(src, src, offset);
-        // dest recover
-        la_sub_d(dest, dest, reg_t);
-        // stxr tmp3, tmp2, [xn]
-        la_sc_d(src, aligned_mem, 0);
-
-        // cbnz tmp3,1
-        la_beqz(src, label_ll);
-
-        free_alloc_gpr(offset);
-        free_alloc_gpr(aligned_mem);
-    } else {
-        IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND offset = ra_alloc_itemp();
-        IR2_OPND aligned_mem = ra_alloc_itemp();
-        // mov, dest can't be changed
-        la_bstrpick_d(dest, reg_s, 7, 0);
-
-        // ldxr wt, [xn]
-        la_label(label_ll);
-        la_bstrpick_d(offset, reg_n, 2, 0);
-        la_or(aligned_mem, reg_n, zero_ir2_opnd);
-        la_bstrins_d(aligned_mem, zero_ir2_opnd, 2, 0);
-        la_ll_d(reg_t, aligned_mem, 0);
-        la_slli_d(offset, offset, 3);
-
-        // bic  tmp2, wt, tmp1
-        li_d(src, 0xff);
-        la_sll_d(src, src, offset);
-        la_andn(src, reg_t, src);
-
-        la_srl_d(reg_t, reg_t, offset);
-        la_bstrpick_d(reg_t, reg_t, 7, 0);
-        la_andn(dest, reg_t, dest);
-
-        la_sll_d(offset, dest, offset);
-        la_or(src, src, offset);
-        // dest recover
-        la_sub_d(dest, dest, reg_t);
-        // stxr tmp3, tmp2, [xn]
-        la_sc_d(src, aligned_mem, 0);
-
-        // cbnz tmp3,1
-        la_beqz(src, label_ll);
-
-        free_alloc_gpr(offset);
-        free_alloc_gpr(aligned_mem);
-    }
-
-    if (acquire) {
-        la_dbar(0);
-    }
-
-    store_gpr_dst(a->rt, reg_t);
-    free_alloc_gpr(reg_s);
-    free_alloc_gpr(reg_t);
-    free_alloc_gpr(reg_n);
-    free_alloc_gpr(src);
-    free_alloc_gpr(dest);
-    return true;
+    return do_lse_atomic(s, LATA_LSE_CLR);
 }
 
 static bool trans_LDEOR(DisasContext* s)
 {
-    lata_unallocated_encoding(s);
-    return true;
+    return do_lse_atomic(s, LATA_LSE_EOR);
 }
 
 static bool trans_LDSET(DisasContext* s)
 {
-    int acquire = extract32(s->insn, 23, 1);
-    int release = extract32(s->insn, 22, 1);
-
-    arg_atomic* a = &(s->arg.f_atomic);
-    IR2_OPND reg_s = alloc_gpr_src(a->rs);
-    IR2_OPND reg_t = alloc_gpr_dst(a->rt);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
-    IR2_OPND src = ra_alloc_itemp();
-    IR2_OPND dest = ra_alloc_itemp();
-
-    if (a->rn == 31) {
-        gen_check_sp_alignment(s);
-    }
-
-    if (release) {
-        la_dbar(0);
-    }
-
-    if (a->sz == 3) {
-        if (a->rt == a->rs || a->rt == a->rn) {
-            IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-            la_or(src, reg_s, zero_ir2_opnd);
-            la_label(label_ll);
-            la_ll_d(reg_t, reg_n, 0);
-            la_or(dest, src, reg_t);
-            la_sc_d(dest, reg_n, 0);
-            la_beqz(dest, label_ll);
-        } else {
-            la_amor_d(reg_t, reg_s, reg_n);
-        }
-    } else if (a->sz == 2) {
-        if (a->rt == a->rs || a->rt == a->rn) {
-            IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-            la_bstrpick_d(src, reg_s, 31, 0);
-            la_label(label_ll);
-            la_ll_w(reg_t, reg_n, 0);
-            la_bstrpick_d(reg_t, reg_t, 31, 0);
-            la_or(dest, src, reg_t);
-            la_sc_w(dest, reg_n, 0);
-            la_beqz(dest, label_ll);
-        } else {
-            la_amor_w(reg_t, reg_s, reg_n);
-            la_bstrpick_d(reg_t, reg_t, 31, 0);
-        }
-    } else if (a->sz == 1) {
-        IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND offset = ra_alloc_itemp();
-        IR2_OPND aligned_mem = ra_alloc_itemp();
-        /*  mov tmp1, ws
-            1:
-            ldxr wt, [xn]
-            or  tmp2, wt, tmp1
-            stxr tmp3, tmp2, [xn]
-            cbnz tmp3,1
-        */
-        // mov, dest can't be changed
-        la_bstrpick_d(dest, reg_s, 15, 0);
-
-        // ldxr wt, [xn]
-        la_label(label_ll);
-        la_bstrpick_d(offset, reg_n, 2, 0);
-        la_or(aligned_mem, reg_n, zero_ir2_opnd);
-        la_bstrins_d(aligned_mem, zero_ir2_opnd, 2, 0);
-        la_ll_d(reg_t, aligned_mem, 0);
-        la_slli_d(offset, offset, 3);
-
-        // or  tmp2, wt, tmp1
-        li_d(src, 0xffff);
-        la_sll_d(src, src, offset);
-        la_or(src, reg_t, src);
-
-        la_srl_d(reg_t, reg_t, offset);
-        la_bstrpick_d(reg_t, reg_t, 15, 0);
-        la_add_d(dest, dest, reg_t);
-
-        la_sll_d(offset, dest, offset);
-        la_or(src, src, offset);
-        // dest recover
-        la_sub_d(dest, dest, reg_t);
-        // stxr tmp3, tmp2, [xn]
-        la_sc_d(src, aligned_mem, 0);
-
-        // cbnz tmp3,1
-        la_beqz(src, label_ll);
-
-        free_alloc_gpr(offset);
-        free_alloc_gpr(aligned_mem);
-    } else {
-        IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND offset = ra_alloc_itemp();
-        IR2_OPND aligned_mem = ra_alloc_itemp();
-        // mov, dest can't be changed
-        la_bstrpick_d(dest, reg_s, 7, 0);
-
-        // ldxr wt, [xn]
-        la_label(label_ll);
-        la_bstrpick_d(offset, reg_n, 2, 0);
-        la_or(aligned_mem, reg_n, zero_ir2_opnd);
-        la_bstrins_d(aligned_mem, zero_ir2_opnd, 2, 0);
-        la_ll_d(reg_t, aligned_mem, 0);
-        la_slli_d(offset, offset, 3);
-
-        // or  tmp2, wt, tmp1
-        li_d(src, 0xff);
-        la_sll_d(src, src, offset);
-        la_or(src, reg_t, src);
-
-        la_srl_d(reg_t, reg_t, offset);
-        la_bstrpick_d(reg_t, reg_t, 7, 0);
-        la_add_d(dest, dest, reg_t);
-
-        la_sll_d(offset, dest, offset);
-        la_or(src, src, offset);
-        // dest recover
-        la_sub_d(dest, dest, reg_t);
-        // stxr tmp3, tmp2, [xn]
-        la_sc_d(src, aligned_mem, 0);
-
-        // cbnz tmp3,1
-        la_beqz(src, label_ll);
-
-        free_alloc_gpr(offset);
-        free_alloc_gpr(aligned_mem);
-    }
-
-    if (acquire) {
-        la_dbar(0);
-    }
-
-    store_gpr_dst(a->rt, reg_t);
-    free_alloc_gpr(reg_s);
-    free_alloc_gpr(reg_t);
-    free_alloc_gpr(reg_n);
-    free_alloc_gpr(src);
-    free_alloc_gpr(dest);
-    return true;
+    return do_lse_atomic(s, LATA_LSE_SET);
 }
 
 static bool trans_LDSMAX(DisasContext* s)
 {
-    lata_unallocated_encoding(s);
-    return true;
+    return do_lse_atomic(s, LATA_LSE_SMAX);
 }
 
 static bool trans_LDSMIN(DisasContext* s)
 {
-    lata_unallocated_encoding(s);
-    return true;
+    return do_lse_atomic(s, LATA_LSE_SMIN);
 }
 
 static bool trans_LDUMAX(DisasContext* s)
 {
-    lata_unallocated_encoding(s);
-    return true;
+    return do_lse_atomic(s, LATA_LSE_UMAX);
 }
 
 static bool trans_LDUMIN(DisasContext* s)
 {
-    lata_unallocated_encoding(s);
-    return true;
+    return do_lse_atomic(s, LATA_LSE_UMIN);
 }
 
 static bool trans_SWP(DisasContext* s)
 {
-    int acquire = extract32(s->insn, 23, 1);
-    int release = extract32(s->insn, 22, 1);
-
-    arg_atomic* a = &(s->arg.f_atomic);
-
-    IR2_OPND reg_s = alloc_gpr_src(a->rs);
-    IR2_OPND reg_t = alloc_gpr_dst(a->rt);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
-    IR2_OPND src = ra_alloc_itemp();
-    IR2_OPND dest = ra_alloc_itemp();
-
-    if (a->rn == 31) {
-        gen_check_sp_alignment(s);
-    }
-
-    if (release) {
-        la_dbar(0);
-    }
-
-    if (a->sz == 3) {
-        if (a->rt == a->rs || a->rt == a->rn) {
-            IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-            la_or(src, reg_s, zero_ir2_opnd);
-            la_label(label_ll);
-            la_ll_d(reg_t, reg_n, 0);
-            la_or(dest, src, zero_ir2_opnd);
-            la_sc_d(dest, reg_n, 0);
-            la_beqz(dest, label_ll);
-        } else {
-            la_amswap_d(reg_t, reg_s, reg_n);
-        }
-    } else if (a->sz == 2) {
-        if (a->rt == a->rs || a->rt == a->rn) {
-            IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-            la_bstrpick_d(src, reg_s, 31, 0);
-            la_label(label_ll);
-            la_ll_w(reg_t, reg_n, 0);
-            la_bstrpick_d(reg_t, reg_t, 31, 0);
-            la_or(dest, src, zero_ir2_opnd);
-            la_sc_w(dest, reg_n, 0);
-            la_beqz(dest, label_ll);
-        } else {
-            la_amswap_w(reg_t, reg_s, reg_n);
-            la_bstrpick_d(reg_t, reg_t, 31, 0);
-        }
-    } else if (a->sz == 1) {
-        IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND offset = ra_alloc_itemp();
-        IR2_OPND aligned_mem = ra_alloc_itemp();
-        /*  mov tmp1, ws
-            1:
-            ldxr wt, [xn]
-            stxr tmp2, tmp1, [xn]
-            cbnz tmp2,1
-        */
-        // mov, dest can't be changed
-        la_bstrpick_d(dest, reg_s, 15, 0);
-
-        // ldxr wt, [xn]
-        la_label(label_ll);
-        la_bstrpick_d(offset, reg_n, 2, 0);
-        la_or(aligned_mem, reg_n, zero_ir2_opnd);
-        la_bstrins_d(aligned_mem, zero_ir2_opnd, 2, 0);
-        la_ll_d(reg_t, aligned_mem, 0);
-        la_slli_d(offset, offset, 3);
-
-        // stxr tmp2, tmp1, [xn]
-        li_d(src, 0xffff);
-        la_sll_d(src, src, offset);
-        la_andn(src, reg_t, src);
-
-        la_srl_d(reg_t, reg_t, offset);
-        la_bstrpick_d(reg_t, reg_t, 15, 0);
-
-        la_sll_d(offset, dest, offset);
-        la_or(src, src, offset);
-        la_sc_d(src, aligned_mem, 0);
-
-        // cbnz tmp2,1
-        la_beqz(src, label_ll);
-
-        free_alloc_gpr(offset);
-        free_alloc_gpr(aligned_mem);
-    } else {
-        IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND offset = ra_alloc_itemp();
-        IR2_OPND aligned_mem = ra_alloc_itemp();
-        // mov, dest can't be changed
-        la_bstrpick_d(dest, reg_s, 7, 0);
-
-        // ldxr ws, [xn]
-        la_label(label_ll);
-        la_bstrpick_d(offset, reg_n, 2, 0);
-        la_or(aligned_mem, reg_n, zero_ir2_opnd);
-        la_bstrins_d(aligned_mem, zero_ir2_opnd, 2, 0);
-        la_ll_d(reg_t, aligned_mem, 0);
-        la_slli_d(offset, offset, 3);
-
-        // stxr tmp2, tmp1, [xn]
-        li_d(src, 0xff);
-        la_sll_d(src, src, offset);
-        la_andn(src, reg_t, src);
-
-        la_srl_d(reg_t, reg_t, offset);
-        la_bstrpick_d(reg_t, reg_t, 7, 0);
-
-        la_sll_d(offset, dest, offset);
-        la_or(src, src, offset);
-        la_sc_d(src, aligned_mem, 0);
-
-        // cbnz tmp2,1
-        la_beqz(src, label_ll);
-
-        free_alloc_gpr(offset);
-        free_alloc_gpr(aligned_mem);
-    }
-
-    if (acquire) {
-        la_dbar(0);
-    }
-
-    store_gpr_dst(a->rt, reg_t);
-    free_alloc_gpr(reg_s);
-    free_alloc_gpr(reg_t);
-    free_alloc_gpr(reg_n);
-    free_alloc_gpr(src);
-    free_alloc_gpr(dest);
-    return true;
+    return do_lse_atomic(s, LATA_LSE_SWP);
 }
 
 static bool trans_LDAPR(DisasContext* s)
 {
-    lata_unallocated_encoding(s);
+    arg_decode_insn3227* a = &(s->arg.f_decode_insn3227);
+    IR2_OPND reg_t = alloc_gpr_dst(a->rt);
+    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
+
+    if (!dc_isar_feature(aa64_atomics, s) || !dc_isar_feature(aa64_rcpc_8_3, s)) {
+        return false;
+    }
+    if (a->rn == 31) {
+        gen_check_sp_alignment(s);
+    }
+
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
+    switch (a->sz) {
+        case 0:
+            la_ld_bu(reg_t, reg_n, 0);
+            break;
+        case 1:
+            la_ld_hu(reg_t, reg_n, 0);
+            break;
+        case 2:
+            la_ld_wu(reg_t, reg_n, 0);
+            break;
+        case 3:
+            la_ld_d(reg_t, reg_n, 0);
+            break;
+        default:
+            g_assert_not_reached();
+    }
+    lata_gen_mb();
+
+    if (a->rt != 31 && arm_la_map[a->rt] >= 0 && clearGprHigh) {
+        set_w_write_flag(a->rt, TRUE);
+    }
+    store_gpr_dst(a->rt, reg_t);
+    free_alloc_gpr(reg_t);
+    free_alloc_gpr(reg_n);
     return true;
 }
 
@@ -4936,13 +4735,52 @@ static bool trans_LDRA(DisasContext* s)
 
 static bool trans_LDAPR_i(DisasContext* s)
 {
-    lata_unallocated_encoding(s);
+    arg_ldapr_stlr_i* a = &(s->arg.f_ldapr_stlr_i);
+    bool iss_sf = ldst_iss_sf(a->sz, a->sign, a->ext);
+    IR2_OPND reg_t = alloc_gpr_dst(a->rt);
+    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
+
+    if (!dc_isar_feature(aa64_rcpc_8_4, s)) {
+        return false;
+    }
+    if (a->rn == 31) {
+        gen_check_sp_alignment(s);
+    }
+
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
+    assist_trans_LDR_i(&reg_t, &reg_n, sextract32(a->imm, 0, 9), a->sz, a->sign, iss_sf);
+    lata_gen_mb();
+
+    if (a->rt != 31 && arm_la_map[a->rt] >= 0 && clearGprHigh) {
+        set_w_write_flag(a->rt, !(a->sign && !iss_sf));
+    } else if (a->sign && !iss_sf) {
+        la_bstrpick_d(reg_t, reg_t, 31, 0);
+    }
+    store_gpr_dst(a->rt, reg_t);
+    free_alloc_gpr(reg_t);
+    free_alloc_gpr(reg_n);
     return true;
 }
 
 static bool trans_STLR_i(DisasContext* s)
 {
-    lata_unallocated_encoding(s);
+    arg_ldapr_stlr_i* a = &(s->arg.f_ldapr_stlr_i);
+    IR2_OPND reg_t = alloc_gpr_src(a->rt);
+    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
+
+    if (!dc_isar_feature(aa64_rcpc_8_4, s)) {
+        return false;
+    }
+    if (a->rn == 31) {
+        gen_check_sp_alignment(s);
+    }
+
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
+    lata_gen_mb();
+    lata_store_gpr_by_size(&reg_t, &reg_n, sextract32(a->imm, 0, 9), a->sz);
+
+    free_alloc_gpr(reg_t);
+    free_alloc_gpr(reg_n);
     return true;
 }
 
@@ -7501,16 +7339,16 @@ static void handle_crc32(DisasContext* s,
     if (crc32c) {
         switch (sz) {
             case 0:
-                la_crcc_w_b_w(reg_d, reg_n, reg_m);
+                la_crcc_w_b_w(reg_d, reg_m, reg_n);
                 break;
             case 1:
-                la_crcc_w_h_w(reg_d, reg_n, reg_m);
+                la_crcc_w_h_w(reg_d, reg_m, reg_n);
                 break;
             case 2:
-                la_crcc_w_w_w(reg_d, reg_n, reg_m);
+                la_crcc_w_w_w(reg_d, reg_m, reg_n);
                 break;
             case 3:
-                la_crcc_w_d_w(reg_d, reg_n, reg_m);
+                la_crcc_w_d_w(reg_d, reg_m, reg_n);
                 break;
             default:
                 lata_unallocated_encoding(s);
@@ -7519,16 +7357,16 @@ static void handle_crc32(DisasContext* s,
     } else {
         switch (sz) {
             case 0:
-                la_crc_w_b_w(reg_d, reg_n, reg_m);
+                la_crc_w_b_w(reg_d, reg_m, reg_n);
                 break;
             case 1:
-                la_crc_w_h_w(reg_d, reg_n, reg_m);
+                la_crc_w_h_w(reg_d, reg_m, reg_n);
                 break;
             case 2:
-                la_crc_w_w_w(reg_d, reg_n, reg_m);
+                la_crc_w_w_w(reg_d, reg_m, reg_n);
                 break;
             case 3:
-                la_crc_w_d_w(reg_d, reg_n, reg_m);
+                la_crc_w_d_w(reg_d, reg_m, reg_n);
                 break;
             default:
                 lata_unallocated_encoding(s);
@@ -9817,7 +9655,113 @@ static void handle_fmov(DisasContext* s, int rd, int rn, int type, bool itof)
     }
 }
 
-static void handle_fjcvtzs(DisasContext* s, int rd, int rn) { lata_unallocated_encoding(s); }
+static void handle_fjcvtzs(DisasContext* s, int rd, int rn)
+{
+    IR2_OPND vreg_n = alloc_fpr_src(rn);
+    IR2_OPND vtmp = ra_alloc_ftemp();
+    IR2_OPND vbound = ra_alloc_ftemp();
+    IR2_OPND reg_d = alloc_gpr_dst(rd);
+    IR2_OPND bits = ra_alloc_itemp();
+    IR2_OPND tmp = ra_alloc_itemp();
+    IR2_OPND flags = ra_alloc_itemp();
+    IR2_OPND label_inexact_zero = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND label_fallback = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND label_exact = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND label_flags_done = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND label_fallback_inexact = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND label_fallback_flags_done = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND label_done = ir2_opnd_new_type(IR2_OPND_LABEL);
+
+    /* JS ToInt32 is trunc(value) modulo 2^32.  For values that fit in int64,
+     * FTINTRZ.L.D gives the truncated integer directly and the low 32 bits are
+     * the architectural result.  The helper is kept for NaN/Inf and huge finite
+     * inputs where exact modulo reduction is not a simple hardware conversion.
+     */
+    la_fcmp_cond_d(fcc0_ir2_opnd, vreg_n, vreg_n, FCMP_COND_CUN);
+    la_bcnez(fcc0_ir2_opnd, label_fallback);
+
+    la_movfr2gr_d(bits, vreg_n);
+    li_d(tmp, (int64_t)0x8000000000000000ULL);
+    la_beq(bits, tmp, label_inexact_zero);
+
+    li_d(tmp, (int64_t)0xc3e0000000000000ULL); /* -2^63 as f64 */
+    la_movgr2fr_d(vbound, tmp);
+    la_fcmp_cond_d(fcc0_ir2_opnd, vreg_n, vbound, FCMP_COND_CLT);
+    la_bcnez(fcc0_ir2_opnd, label_fallback);
+
+    li_d(tmp, (int64_t)0x43e0000000000000ULL); /* +2^63 as f64 */
+    la_movgr2fr_d(vbound, tmp);
+    la_fcmp_cond_d(fcc0_ir2_opnd, vbound, vreg_n, FCMP_COND_CLE);
+    la_bcnez(fcc0_ir2_opnd, label_fallback);
+
+    la_ftintrz_l_d(vtmp, vreg_n);
+    la_movfr2gr_d(bits, vtmp);
+    la_bstrpick_d(reg_d, bits, 31, 0);
+
+    la_movgr2fr_d(vtmp, bits);
+    la_ffint_d_l(vtmp, vtmp);
+    la_fcmp_cond_d(fcc0_ir2_opnd, vreg_n, vtmp, FCMP_COND_CEQ);
+    la_bcnez(fcc0_ir2_opnd, label_exact);
+    li_d(flags, 0);
+    la_b(label_flags_done);
+
+    la_label(label_exact);
+    li_d(flags, 0x40000000); /* NZCV.Z = 1, N/C/V = 0 */
+    la_label(label_flags_done);
+    la_armmtflag(flags, 0x39);
+    la_b(label_done);
+
+    la_label(label_inexact_zero);
+    la_mov64(reg_d, zero_ir2_opnd);
+    la_armmtflag(zero_ir2_opnd, 0x39);
+    la_b(label_done);
+
+    la_label(label_fallback);
+    li_d(tmp, s->base->pc_next);
+    la_st_d(tmp, env_ir2_opnd, env_offset_pc());
+    if (arm_la_fmap[rn] >= 0) {
+        la_vst(ir2_opnd_new(IR2_OPND_FPR, arm_la_fmap[rn]), env_ir2_opnd, env_offset_fpr(rn));
+    }
+    lata_gen_call_helper_prologue_no_flags(tcg_ctx);
+    li_d(tmp, env_offset_fpr(rn));
+    la_ldx_d(a0_ir2_opnd, env_ir2_opnd, tmp);
+    li_d(tmp, env_offset_fpstatus());
+    la_add_d(a1_ir2_opnd, env_ir2_opnd, tmp);
+    li_d(tmp, (uint64_t)helper_fjcvtzs);
+    la_jirl(ra_ir2_opnd, tmp, 0);
+    la_srli_d(flags, a0_ir2_opnd, 32);
+    la_bnez(flags, label_fallback_inexact);
+    li_d(flags, 0x40000000);
+    la_b(label_fallback_flags_done);
+    la_label(label_fallback_inexact);
+    li_d(flags, 0);
+    la_label(label_fallback_flags_done);
+    la_armmtflag(flags, 0x39);
+    if (rd != 31) {
+        li_d(tmp, env_offset_gpr(rd));
+        la_stx_w(a0_ir2_opnd, env_ir2_opnd, tmp);
+    }
+    lata_gen_call_helper_epilogue_no_flags(tcg_ctx);
+    if (rd != 31) {
+        li_d(tmp, env_offset_gpr(rd));
+        la_ldx_wu(reg_d, env_ir2_opnd, tmp);
+    } else {
+        la_mov64(reg_d, zero_ir2_opnd);
+    }
+
+    la_label(label_done);
+    if (rd != 31 && arm_la_map[rd] >= 0 && clearGprHigh) {
+        set_w_write_flag(rd, TRUE);
+    }
+    store_gpr_dst(rd, reg_d);
+    free_alloc_fpr(vreg_n);
+    free_alloc_fpr(vtmp);
+    free_alloc_fpr(vbound);
+    free_alloc_gpr(reg_d);
+    free_alloc_gpr(bits);
+    free_alloc_gpr(tmp);
+    free_alloc_gpr(flags);
+}
 
 /* Floating point <-> integer conversions
  *   31   30  29 28       24 23  22  21 20   19 18 16 15         10 9  5 4  0
