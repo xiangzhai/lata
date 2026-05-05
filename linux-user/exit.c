@@ -22,6 +22,9 @@
 #include "qemu.h"
 #include "user-internals.h"
 #include "qemu/plugin.h"
+#ifdef CONFIG_LATA_DEBUG
+#include "target/arm/lata/include/lata-debug.h"
+#endif
 #ifdef CONFIG_GPROF
 #include <sys/gmon.h>
 #endif
@@ -41,12 +44,7 @@ void preexit_cleanup(CPUArchState *env, int code)
         gdb_exit(code);
         qemu_plugin_user_exit();
         perf_exit();
-#ifdef CONFIG_LATA_INDIRECT_JMP
-        if (indirect_jmp_opt_profile) {
-                long jr_cnt = thread_cpu->env_ptr->jr_cnt;
-                long jr_hit = thread_cpu->env_ptr->jr_hit;
-                qemu_log("jr_cnt:%ld, jr_hit:%ld, hit_ratio:%f\n", jr_cnt, jr_hit, (double)jr_hit / jr_cnt);
-        }
-        
+#ifdef CONFIG_LATA_DEBUG
+        lata_debug_print_stats(thread_cpu);
 #endif
 }

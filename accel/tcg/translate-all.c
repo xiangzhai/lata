@@ -67,6 +67,7 @@
 
 #ifdef CONFIG_LATA
 #include "target/arm/tcg/translate.h"
+#include "target/arm/lata/include/lata-debug.h"
 #include "target/arm/lata/include/translate.h"
 #include "target/arm/lata/include/translate-a64.h"
 #endif
@@ -271,12 +272,25 @@ void page_init(void)
 int tr_translate_tb(struct TranslationBlock *tb)
 {
 #ifdef CONFIG_LATA
+    LataDebugDumpState debug_state;
+
     tr_init(tb);
+    lata_debug_begin_tb(tb, &debug_state);
     tcg_insn_unit *gen_code_buf;
     gen_code_buf = tcg_ctx->code_gen_ptr;
+    if (option_lata_dump_ir1) {
+        lata_debug_dump_ir1(tb);
+    }
     tr_ir2_generate(tb);
+    if (option_lata_dump_ir2) {
+        lata_debug_dump_ir2();
+    }
     int gen_code_size = tr_ir2_assemble(gen_code_buf) * 4;
     tb->codesize = gen_code_size;
+    if (option_lata_dump_host) {
+        lata_debug_dump_host(tb, gen_code_buf, gen_code_size);
+    }
+    lata_debug_end_tb(&debug_state);
     tr_fini();
 
     return gen_code_size;

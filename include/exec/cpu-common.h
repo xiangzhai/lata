@@ -169,10 +169,8 @@ void list_cpus(void);
 
 
 #ifdef CONFIG_LATA
-extern int option_fam_jmp_cache;
+#include "target/arm/lata/include/lata-options.h"
 #ifdef CONFIG_LATA_INDIRECT_JMP
-extern int indirect_jmp_opt_profile;
 #endif
-extern int option_fp_precise;
 #endif
 #endif /* CPU_COMMON_H */

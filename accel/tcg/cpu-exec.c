@@ -43,6 +43,9 @@
 #include "tb-hash.h"
 #include "tb-context.h"
 #include "internal.h"
+#ifdef CONFIG_LATA
+#include "target/arm/lata/include/lata-debug.h"
+#endif
 #ifdef CONFIG_LATA_TU
 #include "tu.h"
 #endif
@@ -455,6 +458,9 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
         log_cpu_exec(log_pc(cpu, itb), cpu, itb);
     }
 
+#ifdef CONFIG_LATA
+    lata_debug_trace_before_exec(cpu, itb);
+#endif
     qemu_thread_jit_execute();
     ret = tcg_qemu_tb_exec(env, tb_ptr);
     cpu->can_do_io = 1;
@@ -475,6 +481,9 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
     *tb_exit = ret & TB_EXIT_MASK;
 
     trace_exec_tb_exit(last_tb, *tb_exit);
+#ifdef CONFIG_LATA
+    lata_debug_trace_after_exec(cpu, itb, last_tb, *tb_exit);
+#endif
 
 #ifdef CONFIG_LATA_TU
     if (*tb_exit <= TB_EXIT_IDX1 && last_tb &&

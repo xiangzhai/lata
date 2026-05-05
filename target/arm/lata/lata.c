@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include "lata.h"
+#include "lata-debug.h"
 
 #include "exec/exec-all.h"
 #include "qemu/log.h"
@@ -597,7 +598,7 @@ void label_dispose(void)
 
 int tr_ir2_assemble(const void *code_start_addr)
 {
-    if (lata_dump) {
+    if (lata_dump || option_lata_dump_host) {
         qemu_log("[LATA] Assemble IR2.\n");
     }
 
@@ -618,10 +619,9 @@ int tr_ir2_assemble(const void *code_start_addr)
             ir2_opcode(pir2) != LISA_X86_INST) {
             uint32 result = ir2_assemble(pir2);
 
-            if (lata_dump) {
-                qemu_log("IR2[%03d] at %p 0x%08x \n", pir2->_id, code_addr,
-                        result);
-                ir2_dump(pir2);
+            if (lata_dump || option_lata_dump_host) {
+                lata_debug_dump_assembled_ir2(pir2->_id, code_addr, result,
+                                              pir2);
             }
 
             *(uint32 *)code_addr = result;
@@ -775,12 +775,14 @@ void lata_fast_jmp_cache_add(CPUArchState *env, uint64_t guest_pc, uint64_t host
         }
         uint64_t* pc_map_cache_ptr = (uint64_t*)env->pc_map_cache;
         pc_map_cache_ptr[guest_pc] = host_pc;  
+        lata_debug_note_fam_add(true);
         // printf("cache:%p guest_pc:%p  host_pc:%p store_pc:%p store_pos:%p\n",(void*)env->pc_map_cache,(void*)guest_pc,(void*)host_pc,(void *)pc_map_cache_ptr[guest_pc],(void *)(uint64_t*)(cpu->pc_map_cache + guest_pc));
         return;
     }
     int64_t index = ((guest_pc >> LATA_PC_LOW_BIT) & (TB_JMP_CACHE_SIZE - 1)) << 4;
     *(uint64_t*)((uint8_t*)env->pc_map_cache + index) = guest_pc;
     *(uint64_t*)((uint8_t*)env->pc_map_cache + index + 8) = host_pc;
+    lata_debug_note_fam_add(false);
 }
 
 void lata_fast_jmp_cache_init(CPUArchState *env,uint64_t start_code,uint64_t end_code)

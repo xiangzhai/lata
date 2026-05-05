@@ -12,6 +12,7 @@
 #include "tcg/tcg.h"
 #include "qemu/cacheflush.h"
 #include "target/arm/lata/include/translate-a64.h"
+#include "target/arm/lata/include/lata-debug.h"
 #include "tu.h"
 #include "disas/disas.h"
 
@@ -143,6 +144,7 @@ static void lata_tu_mark_tb_fallback(TranslationBlock *tb,
         return;
     }
     tb->tu_fallback_reason = reason;
+    lata_debug_note_tu_fallback(reason);
 }
 
 static void lata_tu_drop_edge(TranslationBlock *tb, int n,
@@ -190,12 +192,15 @@ static void lata_tu_edge_emit_common(TranslationBlock *tb, int n,
                                      LataTUBranchKind branch_kind)
 {
     LataTUEdge *edge = &tb->tu_edges[n];
+    LataTUEdgeState old_state = edge->state;
+
     edge->kind = lata_tu_edge_kind_for_index(n);
     edge->branch_kind = branch_kind;
     edge->state = LATA_TU_EDGE_EMITTED;
     edge->branch_offset = label_id;
     edge->fallback_guest_pc = fallback_guest_pc;
     tb->tu_has_edges = true;
+    lata_debug_trace_tu_edge_state(tb, n, old_state, edge->state, "emit");
 }
 
 void lata_tu_edge_emit_branch(TranslationBlock *tb, int n, uint32_t label_id,
@@ -233,7 +238,12 @@ bool lata_tu_edge_is_unlinked(TranslationBlock *tb, int n)
 void lata_tu_mark_relink_pending(TranslationBlock *tb, int n)
 {
     if (lata_tu_edge_is_unlinked(tb, n)) {
+        LataTUEdgeState old_state = tb->tu_edges[n].state;
+
         tb->tu_edges[n].state = LATA_TU_EDGE_RELINK_PENDING;
+        lata_debug_trace_tu_edge_state(tb, n, old_state,
+                                       tb->tu_edges[n].state,
+                                       "mark-relink");
     }
 }
 
@@ -1212,6 +1222,7 @@ bool lata_tu_relink_edge(TranslationBlock *tb, int n,
     if (!lata_tu_edge_patch_site_valid(tb, edge)) {
         qatomic_set(&tb->jmp_dest[n], (uintptr_t)NULL);
         edge->fallback_reason = LATA_TU_FALLBACK_INVALID_TARGET;
+        lata_debug_note_tu_fallback(LATA_TU_FALLBACK_INVALID_TARGET);
         return false;
     }
 
@@ -1219,13 +1230,18 @@ bool lata_tu_relink_edge(TranslationBlock *tb, int n,
                                       (uintptr_t)target_tb->tc.ptr)) {
         qatomic_set(&tb->jmp_dest[n], (uintptr_t)NULL);
         edge->fallback_reason = LATA_TU_FALLBACK_BRANCH_RANGE;
+        lata_debug_note_tu_fallback(LATA_TU_FALLBACK_BRANCH_RANGE);
         return false;
     }
     edge->target_tb = target_tb;
     edge->guest_pc = target_tb->pc;
     edge->saved_insn = *(uint32_t *)((uintptr_t)tb->tc.ptr +
                                     edge->branch_offset);
+    LataTUEdgeState old_state = edge->state;
+
     edge->state = LATA_TU_EDGE_LINKED;
+    lata_debug_trace_tu_edge_state(tb, n, old_state, edge->state, "relink");
+    lata_debug_note_tu_edge_relinked();
 
     tb->jmp_list_next[n] = target_tb->jmp_list_head;
     target_tb->jmp_list_head = (uintptr_t)tb | n;
@@ -1250,12 +1266,18 @@ void tu_unlink_branch(TranslationBlock *tb, int n)
     uintptr_t fix_addr = (uintptr_t)tb->tc.ptr + edge->branch_offset;
     uintptr_t stub_addr = (uintptr_t)tb->tc.ptr + edge->unlink_stub_offset;
     uint32_t fix_insn = *(uint32_t *)fix_addr;
+    LataTUEdgeState old_state = edge->state;
+
     if ((fix_insn & 0xFC000000) == 0x50000000) {
         if (!tu_patch_b(fix_addr, stub_addr)) {
             edge->fallback_reason = LATA_TU_FALLBACK_BRANCH_RANGE;
+            lata_debug_note_tu_fallback(LATA_TU_FALLBACK_BRANCH_RANGE);
             return;
         }
         edge->state = LATA_TU_EDGE_UNLINKED;
+        lata_debug_trace_tu_edge_state(tb, n, old_state, edge->state,
+                                       "unlink");
+        lata_debug_note_tu_edge_unlinked();
         return;
     }
 
@@ -1263,9 +1285,12 @@ void tu_unlink_branch(TranslationBlock *tb, int n)
               "TU conditional unlink requires a shared fallback stub\n");
     if (!tu_patch_as_b(fix_addr, stub_addr)) {
         edge->fallback_reason = LATA_TU_FALLBACK_BRANCH_RANGE;
+        lata_debug_note_tu_fallback(LATA_TU_FALLBACK_BRANCH_RANGE);
         return;
     }
     edge->state = LATA_TU_EDGE_UNLINKED;
+    lata_debug_trace_tu_edge_state(tb, n, old_state, edge->state, "unlink");
+    lata_debug_note_tu_edge_unlinked();
 }
 
 static void tu_register_edge(TranslationBlock *tb, int n,
@@ -1373,12 +1398,15 @@ static void lata_tu_finalize_edges(TranslationBlock **tb_list,
             lata_tu_validate_edge_for_finalization(tb, n, target_tb,
                                                    tu_code_end);
             if (!tu_relocat_branch(tb, n)) {
+                LataTUFallbackReason reason = edge->fallback_reason;
+
                 if (lata_tu_patch_edge_to_unlink_stub(tb, n)) {
                     edge->state = LATA_TU_EDGE_UNLINKED;
                     lata_debug_note_tu_edge_unlinked();
                 } else {
-                    lata_tu_drop_edge(tb, n, edge->fallback_reason);
+                    lata_tu_drop_edge(tb, n, reason);
                 }
+                lata_debug_note_tu_fallback(reason);
             }
         }
     }
@@ -1407,6 +1435,7 @@ bool tu_relocat_branch(TranslationBlock *tb, int n)
         if (use_tu_edge && tu_patch_b(fix_addr, (uintptr_t)tb_next->tc.ptr)) {
             edge->saved_insn = *(uint32_t *)fix_addr;
             edge->state = LATA_TU_EDGE_LINKED;
+            lata_debug_note_tu_edge_linked();
             tu_register_edge(tb, n, tb_next);
             return true;
         }
@@ -1430,6 +1459,7 @@ bool tu_relocat_branch(TranslationBlock *tb, int n)
         }
         edge->saved_insn = *(uint32_t *)fix_addr;
         edge->state = LATA_TU_EDGE_LINKED;
+        lata_debug_note_tu_edge_linked();
         tu_register_edge(tb, n, tb_next);
         return true;
     } else if ((fix_insn & 0xF8000000) == 0x40000000) {
@@ -1445,6 +1475,7 @@ bool tu_relocat_branch(TranslationBlock *tb, int n)
         }
         edge->saved_insn = *(uint32_t *)fix_addr;
         edge->state = LATA_TU_EDGE_LINKED;
+        lata_debug_note_tu_edge_linked();
         tu_register_edge(tb, n, tb_next);
         return true;
     }
@@ -1506,6 +1537,7 @@ void translate_tu(TranslationBlock **tb_list)
         lata_fast_jmp_cache_add(tb->env, tb->pc, (uint64_t)(tb->tc.ptr));
     }
     tb_list[0]->s_data->tu_size = tcg_ctx->code_gen_ptr - tb_list[0]->tc.ptr;
+    lata_debug_note_tu_generated(tb_num_in_tu, tb_list[0]->s_data->tu_size);
 #ifndef CONFIG_TCG_INTERPRETER
     flush_idcache_range((uintptr_t)tb_list[0]->tc.ptr,
                         (uintptr_t)tcg_splitwx_to_rw(tb_list[0]->tc.ptr),
@@ -1602,6 +1634,7 @@ TranslationBlock *tu_gen_code(CPUState *cpu,
     /* 3.Insert TBs in TU to QHT */
     register_tu(tb_list, cpu, cflags);
     print_tu(cpu, tb_list);
+    lata_debug_dump_tu(cpu, tb_list, tu_data->tb_num);
     tu_trees_reset();
     return entry;
 }

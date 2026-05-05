@@ -25,6 +25,7 @@
 #include "ir1.h"
 #include "ir1-arg.h"
 #include "translate-a64.h"
+#include "lata-debug.h"
 #include "tu.h"
 #include "clear-high.h"
 #endif
@@ -257,6 +258,47 @@ static void lata_unallocated_encoding(DisasContext* s)
 
     free_alloc_gpr(temp);
     return;
+}
+
+static void lata_gen_runtime_trace(DisasContext *s)
+{
+#ifdef CONFIG_LATA_DEBUG
+    IR2_OPND helper = ra_alloc_itemp();
+
+    lata_gen_call_helper_prologue_no_flags(tcg_ctx);
+    la_mov64(a0_ir2_opnd, env_ir2_opnd);
+    li_d(a1_ir2_opnd, s->pc_curr);
+    li_d(a2_ir2_opnd, s->insn);
+    li_d(a3_ir2_opnd, s->insn_type);
+    li_d(helper, (uint64_t)lata_debug_runtime_trace);
+    la_jirl(ra_ir2_opnd, helper, 0);
+    lata_gen_call_helper_epilogue_no_flags(tcg_ctx);
+
+    free_alloc_gpr(helper);
+#endif
+}
+
+static void lata_gen_trace_mem_store(DisasContext *s, IR2_OPND addr,
+                                     uint32_t size, bool is_vector)
+{
+#ifdef CONFIG_LATA_DEBUG
+    IR2_OPND helper;
+
+    if (!lata_trace_mem) {
+        return;
+    }
+
+    helper = ra_alloc_itemp();
+    lata_gen_call_helper_prologue_no_flags(tcg_ctx);
+    li_d(a0_ir2_opnd, s->pc_curr);
+    la_mov64(a1_ir2_opnd, addr);
+    li_d(a2_ir2_opnd, size);
+    li_d(a3_ir2_opnd, is_vector);
+    li_d(helper, (uint64_t)lata_debug_trace_mem_store);
+    la_jirl(ra_ir2_opnd, helper, 0);
+    lata_gen_call_helper_epilogue_no_flags(tcg_ctx);
+    free_alloc_gpr(helper);
+#endif
 }
 
 static void lata_clean_data_tbi(DisasContext* s, IR2_OPND* dst, IR2_OPND* src, int tbi)
@@ -504,6 +546,13 @@ static void gen_goto_tb_indirect(DisasContext* s, uint32_t rn)
     free_alloc_gpr(reg_n);
 }
 
+static void gen_goto_tb_indirect_boundary(DisasContext *s, uint32_t rn,
+                                          LataTUBoundaryKind kind)
+{
+    lata_debug_note_tu_boundary(kind);
+    gen_goto_tb_indirect(s, rn);
+}
+
 static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n)
 {
 
@@ -563,6 +612,13 @@ static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n)
     lata_gen_exit_tb_ret_0(s);
 
     free_alloc_gpr(reg_n);
+}
+
+static void gen_goto_tb_indirect_blr_boundary(DisasContext *s,
+                                              IR2_OPND reg_n)
+{
+    lata_debug_note_tu_boundary(LATA_TU_BOUNDARY_BLR);
+    gen_goto_tb_indirect_blr(s, reg_n);
 }
 
 static inline void li_arm_addr(IR2_OPND opnd2, int64_t value)
@@ -1077,7 +1133,7 @@ static bool trans_BR(DisasContext* s)
             }
         }
     }
-    gen_goto_tb_indirect(s, a->rn);
+    gen_goto_tb_indirect_boundary(s, a->rn, LATA_TU_BOUNDARY_BR);
     // s->base->is_jmp = DISAS_NORETURN;
 
     return true;
@@ -1108,7 +1164,7 @@ static bool trans_BLR(DisasContext* s)
     li_d(x30, s->base->pc_next); /* BL setting X30 to PC+4 */
     store_gpr_dst(30, x30);
 
-    gen_goto_tb_indirect_blr(s, reg_n);
+    gen_goto_tb_indirect_blr_boundary(s, reg_n);
     // s->base->is_jmp = DISAS_NORETURN;
 
     return true;
@@ -1124,7 +1180,7 @@ static bool trans_RET(DisasContext* s)
             }
         }
     }
-    gen_goto_tb_indirect(s, a->rn);
+    gen_goto_tb_indirect_boundary(s, a->rn, LATA_TU_BOUNDARY_RET);
     // s->base->is_jmp = DISAS_NORETURN;
 
     return true;
@@ -2305,6 +2361,8 @@ static bool trans_SYS(DisasContext* s)
 static bool trans_SVC(DisasContext* s)
 {
     arg_i* a = &(s->arg.f_i);
+    lata_debug_note_tu_boundary(LATA_TU_BOUNDARY_SVC);
+
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
@@ -3561,9 +3619,21 @@ static bool trans_STGP(DisasContext* s)
     return true;
 }
 
-static void assist_trans_STR_i(IR2_OPND* reg_t, IR2_OPND* reg_n, int64_t offset, uint64_t sz)
+static void assist_trans_STR_i(DisasContext *s, IR2_OPND* reg_t,
+                               IR2_OPND* reg_n, int64_t offset, uint64_t sz)
 {
+    IR2_OPND addr = *reg_n;
+
+    if (offset) {
+        addr = ra_alloc_itemp();
+        li_d(addr, offset);
+        la_add_d(addr, *reg_n, addr);
+    }
+    lata_gen_trace_mem_store(s, addr, 1u << sz, false);
     lata_store_gpr_by_size(reg_t, reg_n, offset, sz);
+    if (offset) {
+        free_alloc_gpr(addr);
+    }
 }
 
 static bool trans_STR_i(DisasContext* s)
@@ -3621,15 +3691,15 @@ static bool trans_STR_i(DisasContext* s)
             IR2_OPND temp = ra_alloc_itemp();
             li_d(temp, a->imm);
             la_add_d(temp, reg_n, temp);
-            assist_trans_STR_i(&reg_t, &temp, 0, a->sz);
+            assist_trans_STR_i(s, &reg_t, &temp, 0, a->sz);
             free_alloc_gpr(temp);
         } else {
-            assist_trans_STR_i(&reg_t, &reg_n, offset, a->sz);
+            assist_trans_STR_i(s, &reg_t, &reg_n, offset, a->sz);
         }
     } else {
         if (!a->p && offset)
             la_addi_d(reg_n, reg_n, offset);
-        assist_trans_STR_i(&reg_t, &reg_n, 0, a->sz);
+        assist_trans_STR_i(s, &reg_t, &reg_n, 0, a->sz);
         if (a->p && offset)
             la_addi_d(reg_n, reg_n, offset);
         if (a->w)
@@ -3736,9 +3806,19 @@ static bool trans_LDR_i(DisasContext* s)
     return true;
 }
 
-static void assist_trans_STR_v_i(IR2_OPND* vreg_t, IR2_OPND* reg_n, int64_t offset, uint64_t sz)
+static void assist_trans_STR_v_i(DisasContext *s, IR2_OPND* vreg_t,
+                                 IR2_OPND* reg_n, int64_t offset, uint64_t sz)
 {
     IR2_OPND temp = ra_alloc_itemp();
+    IR2_OPND addr = *reg_n;
+    uint32_t size = sz == 4 ? 16 : (1u << sz);
+
+    if (offset) {
+        li_d(temp, offset);
+        la_add_d(temp, *reg_n, temp);
+        addr = temp;
+    }
+    lata_gen_trace_mem_store(s, addr, size, true);
     switch (sz) {
         case 0:
             if (offset) {
@@ -3801,17 +3881,17 @@ static bool trans_STR_v_i(DisasContext* s)
             IR2_OPND temp = ra_alloc_itemp();
             li_d(temp, a->imm);
             la_add_d(temp, reg_n, temp);
-            assist_trans_STR_v_i(&vreg_t, &temp, 0, a->sz);
+            assist_trans_STR_v_i(s, &vreg_t, &temp, 0, a->sz);
             free_alloc_gpr(temp);
         } else {
             // la_addi_d(temp, reg_n, a->imm);
-            assist_trans_STR_v_i(&vreg_t, &reg_n, offset, a->sz);
+            assist_trans_STR_v_i(s, &vreg_t, &reg_n, offset, a->sz);
         }
     } else {
         if (!a->p && offset)
             la_addi_d(reg_n, reg_n, offset);
 
-        assist_trans_STR_v_i(&vreg_t, &reg_n, 0, a->sz);
+        assist_trans_STR_v_i(s, &vreg_t, &reg_n, 0, a->sz);
 
         if (a->p && offset)
             la_addi_d(reg_n, reg_n, offset);
@@ -21514,6 +21594,11 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
             break;
         }
 #endif
+        lata_debug_check_break_insn(pir1->pc_curr, pir1->insn,
+                                    pir1->insn_type);
+        if (lata_debug_should_trace_runtime(pir1->pc_curr)) {
+            lata_gen_runtime_trace(pir1);
+        }
         bool trans_success = translate_functions[pir1->insn_type](pir1);
         if (!trans_success) {
             lsassertm(0, "ir1_translate fail");

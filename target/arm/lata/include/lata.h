@@ -7,6 +7,7 @@
 #include "mem.h"
 #include "ir2.h"
 #include "la-append.h"
+#include "lata-options.h"
 #include "reg-alloc.h"
 #include "macro-inst.h"
 

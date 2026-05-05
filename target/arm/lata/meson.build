@@ -1,5 +1,7 @@
 arm_ss.add(files(
   'lata.c',
+  'lata-debug.c',
+  'lata-options.c',
   'mem.c',
 ))
 subdir('ir1')
