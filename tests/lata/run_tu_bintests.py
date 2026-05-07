@@ -379,6 +379,54 @@ target:
         mov     x0, #77
         ret     x17
 """,
+    "fam_ret_x30_state_live": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #0
+        mov     x20, #11
+        bl      first_call
+        cmp     x19, #42
+        b.ne    fail
+        bl      first_call
+        cmp     x19, #84
+        b.eq    pass
+        b       fail
+first_call:
+        add     x19, x19, x20
+        add     x19, x19, #31
+        ret
+""",
+    "fam_br_state_live": r"""
+        .text
+        .global _start
+_start:
+        adrp    x16, target
+        add     x16, x16, :lo12:target
+        mov     x19, #123
+        br      x16
+        b       fail
+target:
+        add     x19, x19, #1
+        cmp     x19, #124
+        b.eq    pass
+        b       fail
+""",
+    "fam_blr_state_live": r"""
+        .text
+        .global _start
+_start:
+        adrp    x16, target
+        add     x16, x16, :lo12:target
+        mov     x19, #5
+        blr     x16
+        cmp     x0, #47
+        b.eq    pass
+        b       fail
+target:
+        add     x0, x19, #42
+        ret
+""",
     "forced_unlink_direct_edge": r"""
         .text
         .global _start

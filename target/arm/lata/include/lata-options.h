@@ -45,6 +45,7 @@ void lata_options_parse_trace_pc(const char *arg);
 void lata_options_parse_trace_vec(const char *arg);
 void lata_options_parse_fp_precise(const char *arg);
 void lata_options_parse_dataflow_opt(const char *arg);
+void lata_options_parse_fam_cache(const char *arg);
 void lata_options_enable_tu_stats(const char *arg);
 void lata_options_enable_fam_stats(const char *arg);
 void lata_options_enable_peephole_stats(const char *arg);

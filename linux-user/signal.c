@@ -796,7 +796,7 @@ static void host_signal_handler(int host_sig, siginfo_t *info, void *puc)
     void *sigmask = host_signal_mask(uc);
 
 #ifdef CONFIG_LATA
-    if(option_fam_jmp_cache && host_sig == SIGBUS){
+    if(option_fam_jmp_cache > 0 && host_sig == SIGBUS){
         uc->uc_mcontext.__pc = context_switch_native_to_bt_ret_0;
         return;
     }

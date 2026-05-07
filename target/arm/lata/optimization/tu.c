@@ -1538,8 +1538,14 @@ void translate_tu(TranslationBlock **tb_list)
                                      search_buff_offset[i]);
         tb->tu_search_addr = (uint8_t *)
             ((void *)(tcg_ctx->tb_gen_tail) + search_buff_offset[i]);
-        lata_fast_jmp_cache_add(tb->env, tb->pc, (uint64_t)(tb->tc.ptr));
     }
+    /*
+     * Only the TU head has a stable external-entry contract for the fast
+     * indirect jump cache.  Interior TBs are optimized for TU-local edges and
+     * must be reached through the dispatcher or through patched TU branches.
+     */
+    lata_fast_jmp_cache_add(tb_list[0]->env, tb_list[0]->pc,
+                            (uint64_t)(tb_list[0]->tc.ptr));
     tb_list[0]->s_data->tu_size = tcg_ctx->code_gen_ptr - tb_list[0]->tc.ptr;
     lata_debug_note_tu_generated(tb_num_in_tu, tb_list[0]->s_data->tu_size);
 #ifndef CONFIG_TCG_INTERPRETER

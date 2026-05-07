@@ -795,7 +795,7 @@ void lata_gen_call_helper_epilogue_no_flags(TCGContext *tcg_ctx)
 
 void lata_fast_jmp_cache_add(CPUArchState *env, uint64_t guest_pc, uint64_t host_pc)
 {
-    if(option_fam_jmp_cache){
+    if(option_fam_jmp_cache > 0){
         if (guest_pc < env->mapping_range[0] || guest_pc >= env->mapping_range[1]) {
             return;
         }
@@ -805,16 +805,50 @@ void lata_fast_jmp_cache_add(CPUArchState *env, uint64_t guest_pc, uint64_t host
         // printf("cache:%p guest_pc:%p  host_pc:%p store_pc:%p store_pos:%p\n",(void*)env->pc_map_cache,(void*)guest_pc,(void*)host_pc,(void *)pc_map_cache_ptr[guest_pc],(void *)(uint64_t*)(cpu->pc_map_cache + guest_pc));
         return;
     }
+    if (option_fam_jmp_cache < 0) {
+        return;
+    }
     int64_t index = ((guest_pc >> LATA_PC_LOW_BIT) & (TB_JMP_CACHE_SIZE - 1)) << 4;
     *(uint64_t*)((uint8_t*)env->pc_map_cache + index) = guest_pc;
     *(uint64_t*)((uint8_t*)env->pc_map_cache + index + 8) = host_pc;
     lata_debug_note_fam_add(false);
 }
 
+void lata_fast_jmp_cache_invalidate(CPUArchState *env, uint64_t guest_pc,
+                                    uint64_t host_pc)
+{
+    if (!env->pc_map_cache) {
+        return;
+    }
+    if (option_fam_jmp_cache > 0) {
+        if (guest_pc < env->mapping_range[0] || guest_pc >= env->mapping_range[1]) {
+            return;
+        }
+        uint64_t *pc_map_cache_ptr = (uint64_t *)env->pc_map_cache;
+        if (pc_map_cache_ptr[guest_pc] == host_pc) {
+            pc_map_cache_ptr[guest_pc] = 0;
+        }
+        return;
+    }
+    if (option_fam_jmp_cache < 0) {
+        return;
+    }
+
+    int64_t index = ((guest_pc >> LATA_PC_LOW_BIT) &
+                     (TB_JMP_CACHE_SIZE - 1)) << 4;
+    uint8_t *entry = (uint8_t *)env->pc_map_cache + index;
+
+    if (*(uint64_t *)entry == guest_pc &&
+        *(uint64_t *)(entry + 8) == host_pc) {
+        *(uint64_t *)entry = 0;
+        *(uint64_t *)(entry + 8) = 0;
+    }
+}
+
 void lata_fast_jmp_cache_init(CPUArchState *env,uint64_t start_code,uint64_t end_code)
 {
     size_t malloc_size;
-    if(option_fam_jmp_cache){
+    if(option_fam_jmp_cache > 0){
         env->mapping_range[0] = start_code;
         env->mapping_range[1] = end_code; 
         malloc_size = (end_code - start_code) * 8;
@@ -826,6 +860,10 @@ void lata_fast_jmp_cache_init(CPUArchState *env,uint64_t start_code,uint64_t end
         fam_cache = p - (start_code * 8);
         env->pc_map_cache = fam_cache;    
         return;    
+    }
+    if (option_fam_jmp_cache < 0) {
+        env->pc_map_cache = NULL;
+        return;
     }
     malloc_size = sizeof(uint64_t) * TB_JMP_CACHE_SIZE * 2;
     ibtc_cache = malloc(malloc_size);

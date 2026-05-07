@@ -544,6 +544,11 @@ static void handle_arg_lata_fam_stats(const char *arg)
     lata_options_enable_fam_stats(arg);
 }
 
+static void handle_arg_lata_fam_cache(const char *arg)
+{
+    lata_options_parse_fam_cache(arg);
+}
+
 static void handle_arg_lata_peephole_stats(const char *arg)
 {
     lata_options_enable_peephole_stats(arg);
@@ -644,6 +649,8 @@ static const struct qemu_argument arg_table[] = {
      "", "print LATA TU statistics at exit"},
     {"lata-fam-stats", "LATA_FAM_STATS", false, handle_arg_lata_fam_stats,
      "", "print LATA FAM/indirect jump statistics at exit"},
+    {"lata-fam-cache", "LATA_FAM_CACHE", true, handle_arg_lata_fam_cache,
+     "1", "select LATA indirect jump cache (debug: 1=direct FAM, 0=IBTC, -1=off)"},
     {"lata-peephole-stats", "LATA_PEEPHOLE_STATS", false,
      handle_arg_lata_peephole_stats,
      "", "print LATA IR2 peephole statistics at exit"},

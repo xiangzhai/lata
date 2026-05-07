@@ -83,6 +83,8 @@ int lata_gen_prologue(TCGContext *tcg_ctx);
 int lata_gen_epilogue(TCGContext *tcg_ctx);
 void lata_fast_jmp_cache_init(CPUArchState *env, uint64_t start_code, uint64_t end_code);
 void lata_fast_jmp_cache_add(CPUArchState *env, uint64_t guest_pc, uint64_t host_pc);
+void lata_fast_jmp_cache_invalidate(CPUArchState *env, uint64_t guest_pc,
+                                    uint64_t host_pc);
 
 int tr_ir2_assemble(const void *code_start_addr);
 void label_dispose(void);

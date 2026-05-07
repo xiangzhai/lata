@@ -33,6 +33,9 @@
 #include "tb-hash.h"
 #include "tb-context.h"
 #include "internal.h"
+#ifdef CONFIG_LATA
+#include "target/arm/lata/include/lata.h"
+#endif
 
 
 /* List iterators for lists of tagged pointers in TranslationBlock. */
@@ -897,6 +900,10 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
         /* A TB may be at any virtual address */
         CPU_FOREACH(cpu) {
             tcg_flush_jmp_cache(cpu);
+#ifdef CONFIG_LATA
+            lata_fast_jmp_cache_invalidate(cpu->env_ptr, tb->pc,
+                                           (uint64_t)tb->tc.ptr);
+#endif
         }
     } else {
         uint32_t h = tb_jmp_cache_hash_func(tb->pc);
@@ -907,6 +914,10 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
             if (qatomic_read(&jc->array[h].tb) == tb) {
                 qatomic_set(&jc->array[h].tb, NULL);
             }
+#ifdef CONFIG_LATA
+            lata_fast_jmp_cache_invalidate(cpu->env_ptr, tb->pc,
+                                           (uint64_t)tb->tc.ptr);
+#endif
         }
     }
 }

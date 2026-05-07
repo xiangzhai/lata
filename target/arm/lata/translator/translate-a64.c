@@ -525,7 +525,7 @@ static void gen_goto_tb_indirect_kind(DisasContext* s, uint32_t rn,
     IR2_OPND host_pc = ra_alloc_itemp();
     IR2_OPND exit = ir2_opnd_new_type(IR2_OPND_LABEL);
 
-    if (option_fam_jmp_cache) {
+    if (option_fam_jmp_cache > 0) {
         IR2_OPND fallback = ir2_opnd_new_type(IR2_OPND_LABEL);
         IR2_OPND miss = ir2_opnd_new_type(IR2_OPND_LABEL);
 
@@ -551,6 +551,10 @@ static void gen_goto_tb_indirect_kind(DisasContext* s, uint32_t rn,
         return;
     }
 
+    if (option_fam_jmp_cache < 0) {
+        goto indirect_fallback;
+    }
+
     LATA_FAM_PROFILE_LOOKUP(guest_pc, fam_kind);
 
     la_bstrpick_d(guest_pc, reg_n, LATA_PC_LOW_BIT + TB_JMP_CACHE_BITS - 1, LATA_PC_LOW_BIT);
@@ -569,6 +573,7 @@ static void gen_goto_tb_indirect_kind(DisasContext* s, uint32_t rn,
     free_alloc_gpr(host_pc);
 #endif
 
+indirect_fallback:
     la_st_d(reg_n, env_ir2_opnd, env_offset_pc());
 
     /* do not link, but context_switch_native_to_bt_ret_0 will do this */
@@ -598,7 +603,7 @@ static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n,
     IR2_OPND host_pc = ra_alloc_itemp();
     IR2_OPND exit = ir2_opnd_new_type(IR2_OPND_LABEL);
 
-    if (option_fam_jmp_cache) {
+    if (option_fam_jmp_cache > 0) {
         IR2_OPND fallback = ir2_opnd_new_type(IR2_OPND_LABEL);
         IR2_OPND miss = ir2_opnd_new_type(IR2_OPND_LABEL);
 
@@ -624,6 +629,10 @@ static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n,
         return;
     }
 
+    if (option_fam_jmp_cache < 0) {
+        goto indirect_blr_fallback;
+    }
+
     LATA_FAM_PROFILE_LOOKUP(guest_pc, fam_kind);
 
     la_bstrpick_d(guest_pc, reg_n, LATA_PC_LOW_BIT + TB_JMP_CACHE_BITS - 1,
@@ -643,6 +652,7 @@ static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n,
     free_alloc_gpr(host_pc);
 #endif
 
+indirect_blr_fallback:
     la_st_d(reg_n, env_ir2_opnd, env_offset_pc());
 
     /* do not link, but context_switch_native_to_bt_ret_0 will do this */
@@ -708,7 +718,7 @@ static void gen_goto_tb(DisasContext* s, int n, int64_t diff)
     }
 #endif
 
-    if (option_fam_jmp_cache) {
+    if (option_fam_jmp_cache > 0) {
         uint64_t guest_dest = s->pc_curr + diff;
         CPUARMState *env = current_cpu->env_ptr;
 
