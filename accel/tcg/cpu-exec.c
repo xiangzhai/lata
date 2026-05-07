@@ -45,6 +45,7 @@
 #include "internal.h"
 #ifdef CONFIG_LATA
 #include "target/arm/lata/include/lata-debug.h"
+#include "target/arm/lata/include/lata-options.h"
 #endif
 #ifdef CONFIG_LATA_TU
 #include "tu.h"
@@ -460,6 +461,20 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
 
 #ifdef CONFIG_LATA
     lata_debug_trace_before_exec(cpu, itb);
+#endif
+#if defined(CONFIG_LATA_DEBUG) && defined(CONFIG_LATA_TU)
+    if (lata_unlink_count &&
+        (!lata_unlink_cpu || lata_unlink_cpu == cpu->cpu_index)) {
+        lata_unlink_count--;
+        if (!lata_unlink_count) {
+            if (lata_tu_edge_active(itb, TB_EXIT_IDX0)) {
+                tu_unlink_branch(itb, TB_EXIT_IDX0);
+            }
+            if (lata_tu_edge_active(itb, TB_EXIT_IDX1)) {
+                tu_unlink_branch(itb, TB_EXIT_IDX1);
+            }
+        }
+    }
 #endif
     qemu_thread_jit_execute();
     ret = tcg_qemu_tb_exec(env, tb_ptr);

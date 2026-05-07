@@ -28,6 +28,7 @@
 #include "lata-debug.h"
 #include "tu.h"
 #include "clear-high.h"
+#include "dataflow.h"
 #endif
 
 #include "qemu/log.h"
@@ -235,7 +236,7 @@ static void lata_unallocated_encoding(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -485,17 +486,50 @@ static void lata_helper_addl_saturate_s32(DisasContext* ctx, IR2_OPND vreg_d, IR
     free_alloc_gpr(temp);
 }
 
-static void gen_goto_tb_indirect(DisasContext* s, uint32_t rn)
+static void gen_goto_tb_indirect_kind(DisasContext* s, uint32_t rn,
+                                      LataFAMKind fam_kind)
 {
     IR2_OPND reg_n = alloc_gpr_src(rn);
 
+#ifdef CONFIG_LATA_PROFILE
+#define LATA_FAM_COUNTER_ENABLED() \
+    (option_lata_fam_stats || indirect_jmp_opt_profile)
+#else
+#define LATA_FAM_COUNTER_ENABLED() (option_lata_fam_stats)
+#endif
+#define LATA_FAM_PROFILE_INC(tmp, kind, base_offset) do {                 \
+    if (LATA_FAM_COUNTER_ENABLED()) {                                     \
+        la_ld_d((tmp), env_ir2_opnd,                                      \
+                (base_offset) + sizeof(uint64_t) * (kind));               \
+        la_addi_d((tmp), (tmp), 1);                                       \
+        la_st_d((tmp), env_ir2_opnd,                                      \
+                (base_offset) + sizeof(uint64_t) * (kind));               \
+    }                                                                     \
+} while (0)
+#define LATA_FAM_PROFILE_LOOKUP(tmp, kind) do {                           \
+    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(fam_lookup_count));     \
+    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(jr_cnt));              \
+} while (0)
+#define LATA_FAM_PROFILE_HIT(tmp, kind) do {                              \
+    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(fam_hit_count));        \
+    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(jr_hit));              \
+} while (0)
+#define LATA_FAM_PROFILE_MISS(tmp, kind)                                  \
+    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(fam_miss_count))
+#define LATA_FAM_PROFILE_RANGE_MISS(tmp, kind)                            \
+    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(fam_range_miss_count))
+
 #ifdef CONFIG_LATA_INDIRECT_JMP
+
     IR2_OPND guest_pc = ra_alloc_itemp();
     IR2_OPND host_pc = ra_alloc_itemp();
     IR2_OPND exit = ir2_opnd_new_type(IR2_OPND_LABEL);
 
     if (option_fam_jmp_cache) {
         IR2_OPND fallback = ir2_opnd_new_type(IR2_OPND_LABEL);
+        IR2_OPND miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+
+        LATA_FAM_PROFILE_LOOKUP(guest_pc, fam_kind);
         li_d(guest_pc, current_cpu->env_ptr->mapping_range[0]);
         la_bltu(reg_n, guest_pc, fallback);
         li_d(guest_pc, current_cpu->env_ptr->mapping_range[1]);
@@ -503,20 +537,21 @@ static void gen_goto_tb_indirect(DisasContext* s, uint32_t rn)
         li_d(host_pc, (uint64_t)(current_cpu->env_ptr->pc_map_cache));
         la_alsl_d(host_pc, reg_n, host_pc, 2);
         la_ld_d(host_pc, host_pc, 0);
-        la_beqz(host_pc, exit);
+        la_beqz(host_pc, miss);
+        LATA_FAM_PROFILE_HIT(guest_pc, fam_kind);
         la_jirl(zero_ir2_opnd, host_pc, 0);
         la_label(fallback);
+        LATA_FAM_PROFILE_RANGE_MISS(guest_pc, fam_kind);
+        la_b(exit);
+        la_label(miss);
+        LATA_FAM_PROFILE_MISS(guest_pc, fam_kind);
         la_label(exit);
         la_st_d(reg_n, env_ir2_opnd, env_offset_pc());
         lata_gen_exit_tb_ret_0(s);
         return;
     }
 
-    if (indirect_jmp_opt_profile) {
-        la_ld_d(guest_pc, env_ir2_opnd, env_offset(jr_cnt));
-        la_addi_d(guest_pc, guest_pc, 1);
-        la_st_d(guest_pc, env_ir2_opnd, env_offset(jr_cnt));
-    }
+    LATA_FAM_PROFILE_LOOKUP(guest_pc, fam_kind);
 
     la_bstrpick_d(guest_pc, reg_n, LATA_PC_LOW_BIT + TB_JMP_CACHE_BITS - 1, LATA_PC_LOW_BIT);
     li_d(host_pc, (uint64_t)(current_cpu->env_ptr->pc_map_cache));
@@ -525,11 +560,7 @@ static void gen_goto_tb_indirect(DisasContext* s, uint32_t rn)
     la_ld_d(host_pc, host_pc, 8);  // host pc
     la_bne(reg_n, guest_pc, exit);
 
-    if (indirect_jmp_opt_profile) {
-        la_ld_d(guest_pc, env_ir2_opnd, env_offset(jr_hit));
-        la_addi_d(guest_pc, guest_pc, 1);
-        la_st_d(guest_pc, env_ir2_opnd, env_offset(jr_hit));
-    }
+    LATA_FAM_PROFILE_HIT(guest_pc, fam_kind);
 
     la_jirl(zero_ir2_opnd, host_pc, 0);
     la_label(exit);
@@ -549,11 +580,17 @@ static void gen_goto_tb_indirect(DisasContext* s, uint32_t rn)
 static void gen_goto_tb_indirect_boundary(DisasContext *s, uint32_t rn,
                                           LataTUBoundaryKind kind)
 {
+    LataFAMKind fam_kind = LATA_FAM_KIND_BR;
+
     lata_debug_note_tu_boundary(kind);
-    gen_goto_tb_indirect(s, rn);
+    if (kind == LATA_TU_BOUNDARY_RET) {
+        fam_kind = rn == 30 ? LATA_FAM_KIND_RET_X30 : LATA_FAM_KIND_RET_XN;
+    }
+    gen_goto_tb_indirect_kind(s, rn, fam_kind);
 }
 
-static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n)
+static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n,
+                                     LataFAMKind fam_kind)
 {
 
 #ifdef CONFIG_LATA_INDIRECT_JMP
@@ -563,6 +600,9 @@ static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n)
 
     if (option_fam_jmp_cache) {
         IR2_OPND fallback = ir2_opnd_new_type(IR2_OPND_LABEL);
+        IR2_OPND miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+
+        LATA_FAM_PROFILE_LOOKUP(guest_pc, fam_kind);
         li_d(guest_pc, current_cpu->env_ptr->mapping_range[0]);
         la_bltu(reg_n, guest_pc, fallback);
         li_d(guest_pc, current_cpu->env_ptr->mapping_range[1]);
@@ -570,20 +610,21 @@ static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n)
         li_d(host_pc, (uint64_t)(current_cpu->env_ptr->pc_map_cache));
         la_alsl_d(host_pc, reg_n, host_pc, 2);
         la_ld_d(host_pc, host_pc, 0);
-        la_beqz(host_pc, exit);
+        la_beqz(host_pc, miss);
+        LATA_FAM_PROFILE_HIT(guest_pc, fam_kind);
         la_jirl(zero_ir2_opnd, host_pc, 0);
         la_label(fallback);
+        LATA_FAM_PROFILE_RANGE_MISS(guest_pc, fam_kind);
+        la_b(exit);
+        la_label(miss);
+        LATA_FAM_PROFILE_MISS(guest_pc, fam_kind);
         la_label(exit);
         la_st_d(reg_n, env_ir2_opnd, env_offset_pc());
         lata_gen_exit_tb_ret_0(s);
         return;
     }
 
-    if (indirect_jmp_opt_profile) {
-        la_ld_d(guest_pc, env_ir2_opnd, env_offset(jr_cnt));
-        la_addi_d(guest_pc, guest_pc, 1);
-        la_st_d(guest_pc, env_ir2_opnd, env_offset(jr_cnt));
-    }
+    LATA_FAM_PROFILE_LOOKUP(guest_pc, fam_kind);
 
     la_bstrpick_d(guest_pc, reg_n, LATA_PC_LOW_BIT + TB_JMP_CACHE_BITS - 1,
         LATA_PC_LOW_BIT);
@@ -593,11 +634,7 @@ static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n)
     la_ld_d(host_pc, host_pc, 8);  // host pc
     la_bne(reg_n, guest_pc, exit);
 
-    if (indirect_jmp_opt_profile) {
-        la_ld_d(guest_pc, env_ir2_opnd, env_offset(jr_hit));
-        la_addi_d(guest_pc, guest_pc, 1);
-        la_st_d(guest_pc, env_ir2_opnd, env_offset(jr_hit));
-    }
+    LATA_FAM_PROFILE_HIT(guest_pc, fam_kind);
 
     la_jirl(zero_ir2_opnd, host_pc, 0);
     la_label(exit);
@@ -618,8 +655,15 @@ static void gen_goto_tb_indirect_blr_boundary(DisasContext *s,
                                               IR2_OPND reg_n)
 {
     lata_debug_note_tu_boundary(LATA_TU_BOUNDARY_BLR);
-    gen_goto_tb_indirect_blr(s, reg_n);
+    gen_goto_tb_indirect_blr(s, reg_n, LATA_FAM_KIND_BLR);
 }
+
+#undef LATA_FAM_PROFILE_INC
+#undef LATA_FAM_COUNTER_ENABLED
+#undef LATA_FAM_PROFILE_LOOKUP
+#undef LATA_FAM_PROFILE_HIT
+#undef LATA_FAM_PROFILE_MISS
+#undef LATA_FAM_PROFILE_RANGE_MISS
 
 static inline void li_arm_addr(IR2_OPND opnd2, int64_t value)
 {
@@ -960,7 +1004,7 @@ static bool trans_B(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -977,7 +1021,7 @@ static bool trans_BL(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -998,7 +1042,7 @@ static bool trans_CBZ(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -1039,7 +1083,7 @@ static bool trans_TBZ(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -1070,7 +1114,7 @@ static bool trans_B_cond(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -1129,7 +1173,7 @@ static bool trans_BR(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -1149,7 +1193,7 @@ static bool trans_BLR(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -1176,7 +1220,7 @@ static bool trans_RET(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -2366,7 +2410,7 @@ static bool trans_SVC(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -2414,7 +2458,7 @@ static bool trans_BRK(DisasContext* s)
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
@@ -21465,6 +21509,7 @@ void target_disasm(struct TranslationBlock* tb, int* max_insns, CPUState* cpu)
         tu_data->ir1_num_in_tu += tb->icount;
     }
 #endif
+    lata_df_analyze_tb(tb);
 }
 
 /* Decode one aarch64 instruction(just generate insns information,don't translate)
@@ -21574,6 +21619,7 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
 
     int ir1_nr = tb->icount;
     DisasContext* pir1 = (DisasContext*)tb->ir1;
+    lata_df_begin_translate(tb);
     for (i = 0; i < ir1_nr; ++i) {
 #ifdef CONFIG_LATA_TU
         DisasContextBase tu_base = *pir1->base;
@@ -21603,6 +21649,7 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
         if (!trans_success) {
             lsassertm(0, "ir1_translate fail");
         }
+        lata_df_advance_insn();
 #ifndef CONFIG_LATA_TU
         tcg_ctx->gen_insn_end_off[i] = (lsenv->tr_data->real_ir2_inst_num) << 2;
         tcg_ctx->gen_insn_data[i * TARGET_INSN_START_WORDS] = pir1->pc_curr;
@@ -21630,7 +21677,7 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
             if (clearGprHigh) {
                 for (int i = 0; i < 32; ++i) {
                     if (arm_la_map[i] >= 0) {
-                        clear_gpr_high(i);
+                        clear_gpr_high_for_boundary(i);
                     }
                 }
             }
@@ -21651,6 +21698,7 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
     gen_tu_unlink_stubs(tb);
 #endif
 
+    lata_df_end_translate();
     return true;
 }
 

@@ -7,6 +7,61 @@
 #include "target/arm/tcg/translate.h"
 #include "target/arm/lata/include/lata.h"
 #include "target/arm/lata/include/lata-debug.h"
+#include "target/arm/lata/include/dataflow.h"
+
+#if defined(CONFIG_LATA_DEBUG) || defined(CONFIG_LATA_PROFILE)
+static const char *lata_fam_kind_name(LataFAMKind kind)
+{
+    switch (kind) {
+    case LATA_FAM_KIND_BR:
+        return "br";
+    case LATA_FAM_KIND_BLR:
+        return "blr";
+    case LATA_FAM_KIND_RET_X30:
+        return "ret-x30";
+    case LATA_FAM_KIND_RET_XN:
+        return "ret-xn";
+    default:
+        return "unknown";
+    }
+}
+
+static void lata_profile_print_fam_stats(CPUArchState *env)
+{
+    uint64_t cnt = env->jr_cnt;
+    uint64_t hit = env->jr_hit;
+    double ratio = cnt ? (double)hit / cnt : 0.0;
+
+    qemu_log("[LATA] indirect-jmp cnt=%" PRIu64 " hit=%" PRIu64
+             " hit_ratio=%f\n", cnt, hit, ratio);
+    for (int i = 0; i < LATA_FAM_KIND_COUNT; i++) {
+        uint64_t lookups = env->fam_lookup_count[i];
+        uint64_t hits = env->fam_hit_count[i];
+        double fam_ratio = lookups ? (double)hits / lookups : 0.0;
+
+        if (option_lata_fam_stats || lookups || env->fam_miss_count[i] ||
+            env->fam_range_miss_count[i]) {
+            qemu_log("[LATA] FAM %s lookup=%" PRIu64
+                     " hit=%" PRIu64 " miss=%" PRIu64
+                     " range_miss=%" PRIu64 " hit_ratio=%f\n",
+                     lata_fam_kind_name(i), lookups, hits,
+                     env->fam_miss_count[i],
+                     env->fam_range_miss_count[i], fam_ratio);
+        }
+    }
+}
+#endif
+
+#if !defined(CONFIG_LATA_DEBUG) && defined(CONFIG_LATA_PROFILE)
+void lata_debug_print_stats(CPUState *cpu)
+{
+    CPUArchState *env = cpu ? cpu->env_ptr : NULL;
+
+    if (indirect_jmp_opt_profile && env) {
+        lata_profile_print_fam_stats(env);
+    }
+}
+#endif
 
 #ifdef CONFIG_LATA_DEBUG
 typedef struct LataDebugStats {
@@ -29,6 +84,7 @@ static LataDebugStats lata_debug_stats;
 typedef struct LataRuntimeTraceState {
     bool valid;
     uint64_t xregs[32];
+    ARMVectorReg vregs[32];
     uint64_t pc;
     uint32_t pstate;
 } LataRuntimeTraceState;
@@ -38,6 +94,53 @@ static __thread LataRuntimeTraceState lata_last_runtime_state;
 static bool lata_debug_tb_matches(TranslationBlock *tb)
 {
     return lata_debug_tb_pc != 0 && tb->pc == lata_debug_tb_pc;
+}
+
+static uint32_t lata_debug_nzcv_from_pstate(uint32_t pstate)
+{
+    return (pstate >> 28) & 0xf;
+}
+
+static void lata_debug_print_nzcv(FILE *file, uint32_t pstate)
+{
+    uint32_t nzcv = lata_debug_nzcv_from_pstate(pstate);
+
+    fprintf(file, "NZCV=%u%u%u%u",
+            (nzcv >> 3) & 1, (nzcv >> 2) & 1,
+            (nzcv >> 1) & 1, nzcv & 1);
+}
+
+static void lata_debug_trace_disas(CPUARMState *env, uint64_t pc)
+{
+    CPUState *cpu = env_cpu(env);
+    g_autofree char *text = NULL;
+
+    text = plugin_disas(cpu, pc, sizeof(LataRuntimeTraceInsn));
+    if (text && text[0]) {
+        fprintf(stderr, "  disas: %s\n", text);
+    }
+}
+
+static void lata_debug_trace_vector_regs(CPUARMState *env, bool *any)
+{
+    if (!option_lata_trace_vec) {
+        return;
+    }
+
+    for (int i = 0; i < 32; i++) {
+        ARMVectorReg *reg = &env->vfp.zregs[i];
+
+        if (!(lata_trace_vec_mask & (1u << i))) {
+            continue;
+        }
+        if (!lata_last_runtime_state.valid ||
+            memcmp(reg, &lata_last_runtime_state.vregs[i], sizeof(*reg))) {
+            fprintf(stderr, "  v%-2d = 0x%016" PRIx64 "%016" PRIx64 "\n",
+                    i, reg->d[1], reg->d[0]);
+            *any = true;
+        }
+        lata_last_runtime_state.vregs[i] = *reg;
+    }
 }
 
 static void lata_debug_trace_ir1_list(TranslationBlock *tb)
@@ -133,6 +236,7 @@ void lata_debug_runtime_trace(void *opaque_env, uint64_t pc, uint32_t insn,
     fprintf(stderr,
             "[LATA runtime] pc=0x%016" PRIx64 " insn=0x%08x type=%d\n",
             pc, insn, insn_type);
+    lata_debug_trace_disas(env, pc);
 
     if (!lata_last_runtime_state.valid) {
         fprintf(stderr, "[LATA runtime] initial state\n");
@@ -157,9 +261,12 @@ void lata_debug_runtime_trace(void *opaque_env, uint64_t pc, uint32_t insn,
     }
     if (!lata_last_runtime_state.valid ||
         env->pstate != lata_last_runtime_state.pstate) {
-        fprintf(stderr, "  pstate = 0x%08x\n", env->pstate);
+        fprintf(stderr, "  pstate = 0x%08x ", env->pstate);
+        lata_debug_print_nzcv(stderr, env->pstate);
+        fprintf(stderr, "\n");
         any = true;
     }
+    lata_debug_trace_vector_regs(env, &any);
     if (lata_last_runtime_state.valid && !any) {
         fprintf(stderr, "  no architectural GPR/PSTATE changes\n");
     }
@@ -243,6 +350,8 @@ void lata_debug_dump_ir1(TranslationBlock *tb)
         qemu_log("IR1[%03d] pc=0x%016" PRIx64 " insn=0x%08x type=%d\n",
                  i, (uint64_t)ir1[i].pc_curr, ir1[i].insn, ir1[i].insn_type);
     }
+    lata_df_dump_tb(tb);
+    lata_df_dump_ir1_facts(tb);
 }
 
 void lata_debug_dump_ir2(void)
@@ -297,6 +406,7 @@ static const char *lata_tu_boundary_kind_name(LataTUBoundaryKind kind)
         return "unknown";
     }
 }
+
 
 static const char *lata_tu_edge_state_name(LataTUEdgeState state)
 {
@@ -368,16 +478,27 @@ static void lata_debug_dump_tu_edge(TranslationBlock *tb, int n)
 {
     LataTUEdge *edge = &tb->tu_edges[n];
     const char *name = n == TU_TB_INDEX_NEXT ? "next" : "target";
+    TranslationBlock *target = tb->next_tb[n];
 
     qemu_log("    %s edge: guest=0x%016" PRIx64 " target_tb=%p "
-             "state=%s branch=%s branch_off=0x%x unlink_off=0x%x "
+             "target_pc=0x%016" PRIx64 " state=%s branch=%s "
+             "branch_off=0x%x unlink_off=0x%x "
              "island_off=0x%x fallback=0x%016" PRIx64 " reason=%s\n",
              name, edge->guest_pc, edge->target_tb,
+             target ? (uint64_t)target->pc : 0,
              lata_tu_edge_state_name(edge->state),
              lata_tu_branch_kind_name(edge->branch_kind),
              edge->branch_offset, edge->unlink_stub_offset,
              edge->branch_island_offset, edge->fallback_guest_pc,
              lata_tu_fallback_reason_name(edge->fallback_reason));
+}
+
+static gint lata_debug_cmp_tb_pc(gconstpointer a, gconstpointer b)
+{
+    const TranslationBlock *ta = *(TranslationBlock * const *)a;
+    const TranslationBlock *tb = *(TranslationBlock * const *)b;
+
+    return ta->pc > tb->pc ? 1 : ta->pc < tb->pc ? -1 : 0;
 }
 
 void lata_debug_dump_tu(CPUState *cpu, TranslationBlock **tb_list,
@@ -390,16 +511,32 @@ void lata_debug_dump_tu(CPUState *cpu, TranslationBlock **tb_list,
     qemu_log("\n[LATA] TU pc=0x%016" PRIx64 " tb_count=%u code_size=%u\n",
              (uint64_t)tb_list[0]->pc, tb_count, tb_list[0]->s_data->tu_size);
 
+    g_autofree TranslationBlock **pc_order =
+        g_new(TranslationBlock *, tb_count);
+    memcpy(pc_order, tb_list, sizeof(*pc_order) * tb_count);
+    g_qsort_with_data(pc_order, tb_count, sizeof(*pc_order),
+                      (GCompareDataFunc)lata_debug_cmp_tb_pc, NULL);
+
+    qemu_log("  TU pc-order:");
+    for (uint32_t i = 0; i < tb_count; i++) {
+        qemu_log(" [%u]=0x%016" PRIx64, i, (uint64_t)pc_order[i]->pc);
+    }
+    qemu_log("\n");
+
     for (uint32_t i = 0; i < tb_count; i++) {
         TranslationBlock *tb = tb_list[i];
 
         qemu_log("  tb[%02u] pc=0x%016" PRIx64 " size=%u icount=%u "
-                 "host=%p code_size=%u tu_off=0x%x next_pc=0x%016" PRIx64
-                 " target_pc=0x%016" PRIx64 " mode=%d fallback=%s\n",
+                 "host=%p code_size=%u tu_off=0x%x flags=0x%x cflags=0x%x "
+                 "cs_base=0x%016" PRIx64 " last_ir1_type=%d "
+                 "next_pc=0x%016" PRIx64 " target_pc=0x%016" PRIx64
+                 " mode=%d fallback=%s\n",
                  i, (uint64_t)tb->pc, tb->size, tb->icount, tb->tc.ptr,
-                 tb->codesize, tb->tc.offset_in_tu, tb->next_pc,
+                 tb->codesize, tb->tc.offset_in_tu, tb->flags, tb->cflags,
+                 (uint64_t)tb->cs_base, tb->last_ir1_type, tb->next_pc,
                  tb->target_pc, tb->s_data->tu_tb_mode,
                  lata_tu_fallback_reason_name(tb->tu_fallback_reason));
+        lata_df_dump_tb(tb);
         lata_debug_dump_tu_edge(tb, TU_TB_INDEX_NEXT);
         lata_debug_dump_tu_edge(tb, TU_TB_INDEX_TARGET);
     }
@@ -504,23 +641,27 @@ void lata_debug_note_fam_add(bool full_assoc)
 void lata_debug_print_stats(CPUState *cpu)
 {
     CPUArchState *env = cpu ? cpu->env_ptr : NULL;
+    bool profile_stats = false;
 
-    if (indirect_jmp_opt_profile && env) {
-        uint64_t cnt = env->jr_cnt;
-        uint64_t hit = env->jr_hit;
-        double ratio = cnt ? (double)hit / cnt : 0.0;
-
-        qemu_log("[LATA] indirect-jmp cnt=%" PRIu64 " hit=%" PRIu64
-                 " hit_ratio=%f fam_add=%" PRIu64 " ibtc_add=%" PRIu64 "\n",
-                 cnt, hit, ratio, lata_debug_stats.fam_add,
-                 lata_debug_stats.ibtc_add);
-    } else if (option_lata_dump || option_lata_dump_tu) {
+#ifdef CONFIG_LATA_PROFILE
+    profile_stats = indirect_jmp_opt_profile;
+#endif
+    if (profile_stats && env) {
+        lata_profile_print_fam_stats(env);
+        qemu_log("[LATA] jump-cache fam_add=%" PRIu64 " ibtc_add=%" PRIu64 "\n",
+                 lata_debug_stats.fam_add, lata_debug_stats.ibtc_add);
+    } else if (option_lata_dump || option_lata_dump_tu ||
+               option_lata_fam_stats) {
+        if (option_lata_fam_stats && env) {
+            lata_profile_print_fam_stats(env);
+        }
         qemu_log("[LATA] jump-cache fam_add=%" PRIu64 " ibtc_add=%" PRIu64 "\n",
                  lata_debug_stats.fam_add, lata_debug_stats.ibtc_add);
     }
 
 #ifdef CONFIG_LATA_TU
-    if (option_lata_dump || option_lata_dump_tu || indirect_jmp_opt_profile) {
+    if (option_lata_dump || option_lata_dump_tu ||
+        option_lata_tu_stats || profile_stats) {
         qemu_log("[LATA] TU stats count=%" PRIu64 " tb_count=%" PRIu64
                  " code_size=%" PRIu64 " edge_linked=%" PRIu64
                  " edge_unlinked=%" PRIu64 " edge_relinked=%" PRIu64 "\n",

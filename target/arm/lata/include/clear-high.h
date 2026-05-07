@@ -7,4 +7,5 @@ extern bool clearGprHigh;
 
 void set_w_write_flag(int i, int is_w);
 void clear_gpr_high(int i);
+void clear_gpr_high_for_boundary(int i);
 #endif

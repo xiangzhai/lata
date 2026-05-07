@@ -458,16 +458,26 @@ static void handle_arg_plugin(const char *arg)
 }
 #endif
 
-#ifdef CONFIG_LATA_DEBUG
+#ifdef CONFIG_LATA_PROFILE
 static void handle_arg_indirect_jmp_opt_profile(const char *arg)
 {
     indirect_jmp_opt_profile = 1;
 }
+#endif
 
+#ifdef CONFIG_LATA
 static void handle_arg_fp_precise(const char *arg)
 {
     lata_options_parse_fp_precise(arg);
 }
+
+static void handle_arg_lata_dataflow_opt(const char *arg)
+{
+    lata_options_parse_dataflow_opt(arg);
+}
+#endif
+
+#ifdef CONFIG_LATA_DEBUG
 
 static void handle_arg_lata_dump(const char *arg)
 {
@@ -508,6 +518,27 @@ static void handle_arg_lata_runtime_trace_end(const char *arg)
 {
     lata_options_parse_trace_end(arg);
 }
+
+static void handle_arg_lata_trace_pc(const char *arg)
+{
+    lata_options_parse_trace_pc(arg);
+}
+
+static void handle_arg_lata_trace_vec(const char *arg)
+{
+    lata_options_parse_trace_vec(arg);
+}
+
+static void handle_arg_lata_tu_stats(const char *arg)
+{
+    lata_options_enable_tu_stats(arg);
+}
+
+static void handle_arg_lata_fam_stats(const char *arg)
+{
+    lata_options_enable_fam_stats(arg);
+}
+
 #endif
 
 struct qemu_argument {
@@ -564,29 +595,43 @@ static const struct qemu_argument arg_table[] = {
      "",           "Seed for pseudo-random number generator"},
     {"trace",      "QEMU_TRACE",       true,  handle_arg_trace,
      "",           "[[enable=]<pattern>][,events=<file>][,file=<file>]"},
-#ifdef CONFIG_LATA_DEBUG
+#ifdef CONFIG_LATA_PROFILE
     {"indirect_jmp_opt_profile", "QEMU_INDIRECT_JMP_OPT_PROFILE",  false, handle_arg_indirect_jmp_opt_profile,
      "",           "run in indirect_jmp_opt_profile mode"},
+#endif
+#ifdef CONFIG_LATA
     {"fp_precise", "QEMU_FP_PRECISE",  true,  handle_arg_fp_precise,
      "1",          "enable precise FP exception/DN/FTZ simulation (1=on, 0=off, default: 1)"},
+    {"lata-dataflow-opt", "LATA_DATAFLOW_OPT", true, handle_arg_lata_dataflow_opt,
+     "1", "enable LATA cross-TB dataflow optimizations (1=on, 0=off)"},
+#endif
+#ifdef CONFIG_LATA_DEBUG
     {"lata-dump", "LATA_DUMP", true, handle_arg_lata_dump,
      "ir1,ir2,host,tu", "dump LATA translation data"},
     {"lata-show-tb", "LATA_SHOW_TB", true, handle_arg_lata_show_tb,
      "pc", "dump one LATA TB by guest PC"},
     {"lata-trace", "LATA_TRACE", true, handle_arg_lata_trace,
-     "tb,ir1,runtime", "trace LATA execution"},
+     "tb,ir1,runtime,vec", "trace LATA execution"},
+    {"lata-trace-pc", "LATA_TRACE_PC", true, handle_arg_lata_trace_pc,
+     "begin:end", "limit LATA runtime instruction trace to a guest PC range"},
     {"lata-runtime-trace-begin", "LATA_BEGIN_TRACE", true,
      handle_arg_lata_runtime_trace_begin,
      "pc", "begin LATA runtime instruction trace at guest PC"},
     {"lata-runtime-trace-end", "LATA_END_TRACE", true,
      handle_arg_lata_runtime_trace_end,
      "pc", "end LATA runtime instruction trace at guest PC"},
+    {"lata-trace-vec", "LATA_TRACE_VEC", true, handle_arg_lata_trace_vec,
+     "0,1,2", "trace selected vector registers in runtime trace"},
     {"lata-trace-mem", "LATA_TRACE_MEM", true, handle_arg_lata_trace_mem,
      "addr", "trace stores to a guest address"},
     {"lata-break-insn", "LATA_BREAK_INSN", true, handle_arg_lata_break_insn,
      "pc", "break when translating a guest instruction PC"},
     {"lata-unlink", "LATA_UNLINK", true, handle_arg_lata_unlink,
      "count[,cpu]", "debug TU unlink after count events"},
+    {"lata-tu-stats", "LATA_TU_STATS", false, handle_arg_lata_tu_stats,
+     "", "print LATA TU statistics at exit"},
+    {"lata-fam-stats", "LATA_FAM_STATS", false, handle_arg_lata_fam_stats,
+     "", "print LATA FAM/indirect jump statistics at exit"},
 #endif
 #ifdef CONFIG_PLUGIN
     {"plugin",     "QEMU_PLUGIN",      true,  handle_arg_plugin,
@@ -1084,8 +1129,10 @@ int main(int argc, char **argv, char **envp)
 #ifdef CONFIG_LATA
     lata_tr_data_init(env);
     env->pstate = 0x40000000;
+#ifdef CONFIG_LATA_PROFILE
     env->jr_cnt = 0;
     env->jr_hit = 0;
+#endif
     lata_prologue_init(tcg_ctx);
 #else
     tcg_prologue_init(tcg_ctx);

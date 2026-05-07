@@ -4338,6 +4338,7 @@ summary_info += {'split-tb-opt':       config_host.has_key('CONFIG_SPLIT_TB')}
 summary_info += {'lata-tu-opt':        config_host.has_key('CONFIG_LATA_TU')}
 summary_info += {'indirect-jmp-opt':   config_host.has_key('CONFIG_LATA_INDIRECT_JMP')}
 summary_info += {'insts-pattern-opt':  config_host.has_key('CONFIG_LATA_INSTS_PATTERN')}
+summary_info += {'lata-profile':       config_host.has_key('CONFIG_LATA_PROFILE')}
 
 summary(summary_info, bool_yn: true, section: 'Optimization in LATA')
 

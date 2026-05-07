@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include "lata.h"
+#include "target/arm/lata/include/ir2-peephole.h"
+#include "target/arm/lata/include/dataflow.h"
 #include "lata-debug.h"
 
 #include "exec/exec-all.h"
@@ -10,6 +12,9 @@
 #ifdef CONFIG_LATA_TU
 #include "tu.h"
 #endif
+
+void clear_gpr_high(int i);
+
 //sp
 //tp
 //zero---unused
@@ -605,6 +610,8 @@ int tr_ir2_assemble(const void *code_start_addr)
     /* 1. assign temp register to physical register */
     /* now, temp register is physical register */
 
+    lata_ir2_peephole_run();
+
     /* 2. label dispose */
     label_dispose();
 
@@ -634,8 +641,24 @@ int tr_ir2_assemble(const void *code_start_addr)
     return code_nr;
 }
 
+static void lata_flush_writes_before_helper(void)
+{
+    if (!lsenv || !lsenv->tr_data || !lsenv->tr_data->w_write_flag) {
+        return;
+    }
+
+    for (int i = 0; i <= 30; ++i) {
+        if (arm_la_map[i] > 0) {
+            clear_gpr_high(i);
+        }
+    }
+}
+
 void lata_gen_call_helper_prologue(TCGContext *tcg_ctx)
 {
+    lata_df_mark_helper_boundary();
+    lata_flush_writes_before_helper();
+
     for(int i = 0; i <= 31; ++i) {
         if(arm_la_map[i] > 0) {
             la_st_d(ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]), env_ir2_opnd, env_offset_gpr(i));
@@ -705,6 +728,9 @@ void lata_gen_call_helper_prologue(TCGContext *tcg_ctx)
 
 void lata_gen_call_helper_prologue_no_flags(TCGContext *tcg_ctx)
 {
+    lata_df_mark_helper_boundary();
+    lata_flush_writes_before_helper();
+
     for(int i = 0; i <= 31; ++i) {
         if(arm_la_map[i] > 0) {
             la_st_d(ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]), env_ir2_opnd, env_offset_gpr(i));

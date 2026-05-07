@@ -114,6 +114,189 @@ cross_page_target:
         b.eq    pass
         b       fail
 """,
+    "w_write_high_live_across_tu_edge": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #-1
+        mov     w19, #1
+        b       check_x19
+        b       fail
+check_x19:
+        lsr     x20, x19, #32
+        cbnz    x20, fail
+        cmp     x19, #1
+        b.eq    pass
+        b       fail
+""",
+    "w_write_high_live_across_cond_edge": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #-1
+        mov     w19, #0x1234
+        mov     x21, #1
+        cbnz    x21, check_x19
+        b       fail
+check_x19:
+        lsr     x20, x19, #32
+        cbnz    x20, fail
+        movz    x21, #0x1234
+        cmp     x19, x21
+        b.eq    pass
+        b       fail
+""",
+    "nzcv_live_across_direct_edge": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #42
+        cmp     x19, #42
+        b       check_flags
+        b       fail
+check_flags:
+        b.eq    pass
+        b       fail
+""",
+    "nzcv_live_across_fallthrough_edge": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #9
+        mov     x20, #4
+        subs    x21, x19, x20
+        b       check_flags
+        b       fail
+check_flags:
+        b.gt    pass
+        b       fail
+""",
+    "nzcv_live_same_tb": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #5
+        cmp     x19, #5
+        b.eq    pass
+        b       fail
+""",
+    "nzcv_dead_after_compare": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #1
+        cmp     x19, #2
+        mov     x20, #9
+        add     x21, x20, #3
+        cmp     x21, #12
+        b.eq    pass
+        b       fail
+""",
+    "setf_preserves_c_and_sets_nzv": r"""
+        .text
+        .global _start
+_start:
+        mov     x0, #0
+        cmp     x0, #0
+        mov     w1, #0
+        setf8   w1
+        mrs     x2, nzcv
+        mov     x3, #0x60000000
+        cmp     x2, x3
+        b.ne    fail
+
+        mov     x0, #0
+        cmp     x0, #1
+        mov     w1, #0x80
+        setf8   w1
+        mrs     x2, nzcv
+        mov     x3, #0x90000000
+        cmp     x2, x3
+        b.ne    fail
+
+        mov     x0, #0
+        cmp     x0, #1
+        mov     w1, #0x8000
+        setf16  w1
+        mrs     x2, nzcv
+        mov     x3, #0x90000000
+        cmp     x2, x3
+        b.eq    pass
+        b       fail
+""",
+    "fcsel_nzcv_live_across_tu_edge": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #5
+        cmp     x19, #5
+        b       check_fcsel
+        b       fail
+check_fcsel:
+        fmov    d0, #1.0
+        fmov    d1, #2.0
+        fcsel   d2, d0, d1, eq
+        fmov    x20, d2
+        movz    x21, #0
+        movk    x21, #0
+        movk    x21, #0
+        movk    x21, #0x3ff0, lsl #48
+        cmp     x20, x21
+        b.eq    pass
+        b       fail
+""",
+    "vector_ldst_boundary": r"""
+        .text
+        .global _start
+_start:
+        movz    x2, #0x7788
+        movk    x2, #0x5566, lsl #16
+        movk    x2, #0x3344, lsl #32
+        movk    x2, #0x1122, lsl #48
+        sub     sp, sp, #32
+        str     x2, [sp]
+        mov     x3, #0
+        str     x3, [sp, #8]
+        ldr     q0, [sp]
+        str     q0, [sp, #16]
+        ldr     x1, [sp, #16]
+        add     sp, sp, #32
+        movz    x2, #0x7788
+        movk    x2, #0x5566, lsl #16
+        movk    x2, #0x3344, lsl #32
+        movk    x2, #0x1122, lsl #48
+        cmp     x1, x2
+        b.eq    pass
+        b       fail
+""",
+    "blr_boundary": r"""
+        .text
+        .global _start
+_start:
+        adrp    x16, target
+        add     x16, x16, :lo12:target
+        mov     x19, #13
+        blr     x16
+        cmp     x0, #55
+        b.eq    pass
+        b       fail
+target:
+        add     x0, x19, #42
+        ret
+""",
+    "ret_xn_boundary": r"""
+        .text
+        .global _start
+_start:
+        bl      target
+        cmp     x0, #77
+        b.eq    pass
+        b       fail
+target:
+        mov     x17, x30
+        mov     x0, #77
+        ret     x17
+""",
 }
 
 
@@ -170,14 +353,26 @@ def build_test(name, asm, out_dir):
     return elf
 
 
-def run_guest(qemu, elf, timeout, debug_tu=False):
+def run_guest(qemu, elf, timeout, debug_tu=False, lata_args=None):
     cmd = [qemu]
     if debug_tu:
         cmd += ["-lata-dump", "tu"]
+    if lata_args:
+        cmd += lata_args
     cmd.append(str(elf))
     result = run(cmd, timeout)
     ok = result.returncode == 0 and "[PASS]" in result.stdout
     return ok, result
+
+
+def check_required_output(name, result, required):
+    text = result.stdout + result.stderr
+    missing = [needle for needle in required if needle not in text]
+    if missing:
+        print(f"FAIL {name} missing debug output: {missing}")
+        print(f"  stderr={result.stderr[:1000]!r}")
+        return False
+    return True
 
 
 def main():
@@ -188,6 +383,10 @@ def main():
     parser.add_argument("--filter")
     parser.add_argument("--debug-tu", action="store_true",
                         help="also pass -lata-dump tu to LATA")
+    parser.add_argument("--lata-arg", action="append", default=[],
+                        help="extra argument passed to QEMU-LATA; repeatable")
+    parser.add_argument("--require-lata-output", action="append", default=[],
+                        help="substring required in LATA stdout/stderr; repeatable")
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
 
@@ -205,7 +404,10 @@ def main():
             elf = build_test(name, asm, out_dir)
             tcg_ok, tcg = run_guest(args.qemu_tcg, elf, args.timeout)
             lata_ok, lata = run_guest(args.qemu_lata, elf, args.timeout,
-                                      args.debug_tu)
+                                      args.debug_tu, args.lata_arg)
+            if lata_ok and args.require_lata_output:
+                lata_ok = check_required_output(name, lata,
+                                                args.require_lata_output)
 
             if tcg_ok and lata_ok:
                 print(f"PASS {name}")

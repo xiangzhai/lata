@@ -16,6 +16,10 @@ typedef struct LataDebugDumpState {
     int tu;
 } LataDebugDumpState;
 
+typedef struct LataRuntimeTraceInsn {
+    uint32_t insn;
+} LataRuntimeTraceInsn;
+
 typedef enum LataTUBoundaryKind {
     LATA_TU_BOUNDARY_BR = 0,
     LATA_TU_BOUNDARY_BLR,
@@ -24,6 +28,14 @@ typedef enum LataTUBoundaryKind {
     LATA_TU_BOUNDARY_OTHER,
     LATA_TU_BOUNDARY_COUNT,
 } LataTUBoundaryKind;
+
+typedef enum LataFAMKind {
+    LATA_FAM_KIND_BR = 0,
+    LATA_FAM_KIND_BLR,
+    LATA_FAM_KIND_RET_X30,
+    LATA_FAM_KIND_RET_XN,
+    LATA_FAM_KIND_COUNT,
+} LataFAMKind;
 
 #ifdef CONFIG_LATA_DEBUG
 void lata_debug_begin_tb(TranslationBlock *tb, LataDebugDumpState *state);
@@ -110,7 +122,13 @@ static inline void lata_debug_trace_tu_edge_state(TranslationBlock *tb, int n,
 #endif
 
 static inline void lata_debug_note_fam_add(bool full_assoc) {}
+#ifndef CONFIG_LATA_PROFILE
 static inline void lata_debug_print_stats(CPUState *cpu) {}
+#endif
+#endif
+
+#if !defined(CONFIG_LATA_DEBUG) && defined(CONFIG_LATA_PROFILE)
+void lata_debug_print_stats(CPUState *cpu);
 #endif
 
 #endif

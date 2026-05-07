@@ -271,6 +271,7 @@ indirect_jmp_opt="no"
 insts_pattern_opt="no"
 lata_tu_opt="no"
 split_tb_opt="no"
+lata_profile="no"
 
 # Don't accept a target_list environment variable.
 unset target_list
@@ -834,6 +835,8 @@ for opt do
   ;;
   --indirect-jmp-opt) indirect_jmp_opt="yes"
   ;;
+  --lata-profile) lata_profile="yes"
+  ;;
   --lata-tu-opt) lata_tu_opt="yes"
   ;;
   --split-tb-opt) split_tb_opt="yes"
@@ -972,6 +975,7 @@ Optional only for LATA:
   ====== Optimize Optional ======
   --indirect-jmp-opt
                           enable indirect branch optimization
+  --lata-profile          enable LATA profiling instrumentation
   --insts-pattern-opt
                           enable instruction pattern optimization
   --lata-tu-opt           enable translation unit
@@ -1836,6 +1840,9 @@ if test "$lata" = "yes" ; then
   fi
   if test "$indirect_jmp_opt" = "yes" ; then
     echo "CONFIG_LATA_INDIRECT_JMP=y" >> $config_host_mak
+  fi
+  if test "$lata_profile" = "yes" ; then
+    echo "CONFIG_LATA_PROFILE=y" >> $config_host_mak
   fi
   if test "$lata_tu_opt" = "yes" ; then
     echo "CONFIG_LATA_TU=y" >> $config_host_mak

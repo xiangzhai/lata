@@ -7,6 +7,7 @@
 #include "ir2.h"
 #include "env.h"
 #include "clear-high.h"
+#include "dataflow.h"
 
 #ifdef CONFIG_LATA_INSTS_PATTERN
 
@@ -88,6 +89,15 @@ static void nzcv_caculate(IR2_OPND temp_n, IR2_OPND temp, IR2_OPND reg_n, int sf
     else
     {
         la_x86adc_w(reg_n, temp_n);
+    }
+}
+
+static void nzcv_calculate_if_live(DisasContext *s, IR2_OPND temp_n,
+                                   IR2_OPND temp, IR2_OPND reg_n,
+                                   int sf, int n)
+{
+    if (lata_df_should_save_nzcv_for_edge(s->base->tb, n)) {
+        nzcv_caculate(temp_n, temp, reg_n, sf, n);
     }
 }
 
@@ -214,35 +224,15 @@ static void trans_CMPI_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
 
-#ifdef CONFIG_LATA_TU
-    TranslationBlock *next_tb = s->base->tb->next_tb[0];
-    if(next_tb){
-        if(next_tb->nzcv_use)
-            nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-    } else {
-        nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-    }
-#else
-    nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-#endif
+    nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 0);
     pattern_goto_tb(s, 0, 4);
     la_label(label);
-#ifdef CONFIG_LATA_TU
-    next_tb = s->base->tb->next_tb[1];
-    if(next_tb){
-        if(next_tb->nzcv_use)
-            nzcv_caculate(temp_n, temp, reg_n, sf, 1);
-    }else{
-        nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-    }
-#else
-    nzcv_caculate(temp_n, temp, reg_n, sf, 1);
-#endif
+    nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 1);
     pattern_goto_tb(s, 1, offset);
 
     free_alloc_gpr(reg_n);
@@ -325,34 +315,14 @@ static void trans_CMPE_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
     if (clearGprHigh) {
         for (int i = 0; i < 32; ++i) {
             if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+                clear_gpr_high_for_boundary(i);
             }
         }
     }
-#ifdef CONFIG_LATA_TU
-    TranslationBlock *next_tb = s->base->tb->next_tb[0];
-    if(next_tb){
-        if(next_tb->nzcv_use)
-            nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-    }else{
-        nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-    }
-#else
-    nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-#endif
+    nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 0);
     pattern_goto_tb(s, 0, 4);
     la_label(label);
-#ifdef CONFIG_LATA_TU
-    next_tb = s->base->tb->next_tb[1];
-    if(next_tb){
-        if(next_tb->nzcv_use)
-            nzcv_caculate(temp_n, temp, reg_n, sf, 1);
-    }else{
-        nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-    }
-#else
-    nzcv_caculate(temp_n, temp, reg_n, sf, 1);
-#endif
+    nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 1);
     pattern_goto_tb(s, 1, offset);
 
     free_alloc_gpr(reg_m);
@@ -435,36 +405,16 @@ static void trans_CMPS_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
             pattern_type(b_type, &temp_n, &temp, &label);
         }
         if (clearGprHigh) {
-        for (int i = 0; i < 32; ++i) {
-            if (arm_la_map[i] >= 0) {
-                clear_gpr_high(i);
+            for (int i = 0; i < 32; ++i) {
+                if (arm_la_map[i] >= 0) {
+                    clear_gpr_high_for_boundary(i);
+                }
             }
         }
-    }
-#ifdef CONFIG_LATA_TU
-        TranslationBlock *next_tb = s->base->tb->next_tb[0];
-        if(next_tb){
-            if(next_tb->nzcv_use)
-                nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-        }else{
-            nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-        }
-#else
-        nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-#endif
+        nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 0);
         pattern_goto_tb(s, 0, 4);
         la_label(label);
-#ifdef CONFIG_LATA_TU
-        next_tb = s->base->tb->next_tb[1];
-        if(next_tb){
-            if(next_tb->nzcv_use)
-                nzcv_caculate(temp_n, temp, reg_n, sf, 1);
-        }else{
-            nzcv_caculate(temp_n, temp, reg_n, sf, 0);
-        }
-#else
-        nzcv_caculate(temp_n, temp, reg_n, sf, 1);
-#endif
+        nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 1);
     }
     else
     {
@@ -481,34 +431,14 @@ static void trans_CMPS_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
         if (clearGprHigh) {
             for (int i = 0; i < 32; ++i) {
                 if (arm_la_map[i] >= 0) {
-                    clear_gpr_high(i);
+                    clear_gpr_high_for_boundary(i);
                 }
             }
         }
-#ifdef CONFIG_LATA_TU
-        TranslationBlock *next_tb = s->base->tb->next_tb[0];
-        if(next_tb){
-            if(next_tb->nzcv_use)
-                nzcv_caculate(temp_n, reg_m, reg_n, sf, 0);
-        }else{
-            nzcv_caculate(temp_n, reg_m, reg_n, sf, 0);
-        }
-#else
-        nzcv_caculate(temp_n, reg_m, reg_n, sf, 0);
-#endif
+        nzcv_calculate_if_live(s, temp_n, reg_m, reg_n, sf, 0);
         pattern_goto_tb(s, 0, 4);
         la_label(label);
-#ifdef CONFIG_LATA_TU
-        next_tb = s->base->tb->next_tb[1];
-        if(next_tb){
-            if(next_tb->nzcv_use)
-                nzcv_caculate(temp_n, reg_m, reg_n, sf, 1);
-        }else{
-            nzcv_caculate(temp_n, reg_m, reg_n, sf, 0);
-        }
-#else
-        nzcv_caculate(temp_n, reg_m, reg_n, sf, 1);
-#endif
+        nzcv_calculate_if_live(s, temp_n, reg_m, reg_n, sf, 1);
     }
 
     pattern_goto_tb(s, 1, offset);

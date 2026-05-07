@@ -32,6 +32,9 @@
 #include "qapi/error.h"
 #include "tcg/tcg.h"
 #include "exec/translation-block.h"
+#ifdef CONFIG_LATA
+#include "target/arm/lata/include/dataflow-lifecycle.h"
+#endif
 #include "tcg-internal.h"
 
 
@@ -151,6 +154,9 @@ static gint tb_tc_cmp(gconstpointer ap, gconstpointer bp, gpointer userdata)
 static void tb_destroy(gpointer value)
 {
     TranslationBlock *tb = value;
+#ifdef CONFIG_LATA
+    lata_df_free_tb(tb);
+#endif
     qemu_spin_destroy(&tb->jmp_lock);
 }
 

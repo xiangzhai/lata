@@ -294,6 +294,10 @@ typedef struct CPUArchState {
 #ifdef CONFIG_LATA
     long jr_cnt;
     long jr_hit;
+    uint64_t fam_lookup_count[4];
+    uint64_t fam_hit_count[4];
+    uint64_t fam_miss_count[4];
+    uint64_t fam_range_miss_count[4];
     void *pc_map_cache;
     uint64_t mapping_range[2];
     uint64_t exclusive_memdata;

@@ -452,6 +452,8 @@ void ir2_remove(IR2_INST *ir2)
 
     ir2->_prev = -1;
     ir2->_next = -1;
+    if(ir2->_opcode >= LISA_GR2SCR)
+        t->real_ir2_inst_num--;
 }
 
 void ir2_insert_before(IR2_INST *ir2, IR2_INST *next)

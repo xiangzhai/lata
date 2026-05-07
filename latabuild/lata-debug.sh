@@ -9,7 +9,7 @@ pkgdir=$srcdir/pkg
 tarballs=$pkgname-$pkgver-$pkgdate.tar.xz
 
 parpare() {
-	[ -d $srcdir/build_aarch64 ] || mkdir -p $srcdir/build_aarch64
+	[ -d $srcdir/build_aarch64_dbg ] || mkdir -p $srcdir/build_aarch64_dbg
 	[ -d $pkgdir ] && rm -rf $pkgdir
 	mkdir -p $pkgdir
 }
@@ -33,7 +33,7 @@ build() {
         # --lata-tu-opt
 	)
 
-	pushd $srcdir/build_aarch64 >/dev/null
+	pushd $srcdir/build_aarch64_dbg >/dev/null
 	../configure "${_configure64_flags[@]}"
 	ninja -j$(nproc)
 	popd >/dev/null

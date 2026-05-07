@@ -253,6 +253,34 @@ struct TranslationBlock {
     int isplit;
     CPUArchState *env;
 #endif
+#ifdef CONFIG_LATA
+    void *lata_df_ir1;
+    uint16_t lata_df_ir1_count;
+    uint32_t lata_df_gpr_use;
+    uint32_t lata_df_gpr_x_use;
+    uint32_t lata_df_gpr_def;
+    uint32_t lata_df_gpr_wdef;
+    uint32_t lata_df_gpr_all_use;
+    uint32_t lata_df_gpr_all_x_use;
+    uint32_t lata_df_gpr_live_in;
+    uint32_t lata_df_gpr_live_out;
+    uint32_t lata_df_gpr_x_live_in;
+    uint32_t lata_df_gpr_x_live_out;
+    uint32_t lata_df_vec_use;
+    uint32_t lata_df_vec_def;
+    uint32_t lata_df_vec_live_in;
+    uint32_t lata_df_vec_live_out;
+    uint8_t lata_df_nzcv_use_mask;
+    uint8_t lata_df_nzcv_def_mask;
+    uint8_t lata_df_nzcv_live_in_mask;
+    uint8_t lata_df_nzcv_live_out_mask;
+    bool lata_df_nzcv_use;
+    bool lata_df_nzcv_def;
+    bool lata_df_nzcv_live_in;
+    bool lata_df_nzcv_live_out;
+    bool lata_df_helper_boundary;
+    bool lata_df_state_boundary;
+#endif
 };
 
 /* The alignment given to TranslationBlock during allocation. */

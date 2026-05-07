@@ -2,7 +2,9 @@
 #include "qemu/cutils.h"
 #include "target/arm/lata/include/lata-options.h"
 
+#ifdef CONFIG_LATA_PROFILE
 int indirect_jmp_opt_profile;
+#endif
 #ifdef CONFIG_LATA_INDIRECT_JMP
 int option_fam_jmp_cache = 1;
 #else
@@ -18,6 +20,10 @@ int option_lata_dump_tu;
 int option_lata_trace_tb;
 int option_lata_trace_ir1;
 int option_lata_trace_runtime;
+int option_lata_trace_vec;
+int option_lata_dataflow_opt = 1;
+int option_lata_tu_stats;
+int option_lata_fam_stats;
 
 uint64_t lata_debug_tb_pc;
 uint64_t lata_trace_mem;
@@ -26,6 +32,7 @@ uint64_t lata_unlink_count;
 uint32_t lata_unlink_cpu;
 uint64_t lata_trace_begin_pc;
 uint64_t lata_trace_end_pc;
+uint32_t lata_trace_vec_mask;
 
 static bool lata_option_is_digit_bitmap(const char *arg)
 {
@@ -57,7 +64,9 @@ static bool lata_option_token_enabled(const char *arg, const char *name)
 
 void lata_options_init(void)
 {
+#ifdef CONFIG_LATA_PROFILE
     indirect_jmp_opt_profile = 0;
+#endif
 #ifdef CONFIG_LATA_INDIRECT_JMP
     option_fam_jmp_cache = 1;
 #else
@@ -73,6 +82,10 @@ void lata_options_init(void)
     option_lata_trace_tb = 0;
     option_lata_trace_ir1 = 0;
     option_lata_trace_runtime = 0;
+    option_lata_trace_vec = 0;
+    option_lata_dataflow_opt = 1;
+    option_lata_tu_stats = 0;
+    option_lata_fam_stats = 0;
 
     lata_debug_tb_pc = 0;
     lata_trace_mem = 0;
@@ -81,6 +94,7 @@ void lata_options_init(void)
     lata_unlink_cpu = 0;
     lata_trace_begin_pc = 0;
     lata_trace_end_pc = 0;
+    lata_trace_vec_mask = 0;
 }
 
 void lata_options_parse_dump(const char *arg)
@@ -126,6 +140,7 @@ void lata_options_parse_trace(const char *arg)
     option_lata_trace_tb = 0;
     option_lata_trace_ir1 = 0;
     option_lata_trace_runtime = 0;
+    option_lata_trace_vec = 0;
 
     if (lata_option_is_digit_bitmap(arg)) {
         option_lata_trace_tb = arg[0] == '1';
@@ -140,6 +155,12 @@ void lata_options_parse_trace(const char *arg)
                             lata_option_token_enabled(arg, "all");
     option_lata_trace_runtime = lata_option_token_enabled(arg, "runtime") ||
                                 lata_option_token_enabled(arg, "all");
+    option_lata_trace_vec = lata_option_token_enabled(arg, "vec") ||
+                            lata_option_token_enabled(arg, "vector") ||
+                            lata_option_token_enabled(arg, "all");
+    if (option_lata_trace_vec && !lata_trace_vec_mask) {
+        lata_trace_vec_mask = UINT32_MAX;
+    }
 }
 
 void lata_options_parse_show_tb(const char *arg)
@@ -192,9 +213,80 @@ void lata_options_parse_trace_end(const char *arg)
     }
 }
 
+void lata_options_parse_trace_pc(const char *arg)
+{
+    if (!arg) {
+        return;
+    }
+
+    g_auto(GStrv) split = g_strsplit(arg, ":", 2);
+    if (split[0] && split[0][0]) {
+        qemu_strtou64(split[0], NULL, 0, &lata_trace_begin_pc);
+    }
+    if (split[1] && split[1][0]) {
+        qemu_strtou64(split[1], NULL, 0, &lata_trace_end_pc);
+    }
+    option_lata_trace_runtime = 1;
+}
+
+void lata_options_parse_trace_vec(const char *arg)
+{
+    if (!arg) {
+        option_lata_trace_vec = 1;
+        lata_trace_vec_mask = UINT32_MAX;
+        return;
+    }
+
+    if (!g_ascii_strcasecmp(arg, "0") ||
+        !g_ascii_strcasecmp(arg, "off") ||
+        !g_ascii_strcasecmp(arg, "none")) {
+        option_lata_trace_vec = 0;
+        lata_trace_vec_mask = 0;
+        return;
+    }
+    if (!g_ascii_strcasecmp(arg, "1") ||
+        !g_ascii_strcasecmp(arg, "on") ||
+        !g_ascii_strcasecmp(arg, "all")) {
+        option_lata_trace_vec = 1;
+        lata_trace_vec_mask = UINT32_MAX;
+        return;
+    }
+
+    option_lata_trace_vec = 1;
+    lata_trace_vec_mask = 0;
+    g_auto(GStrv) split = g_strsplit(arg, ",", 0);
+    for (char **p = split; p && *p; p++) {
+        uint64_t reg;
+
+        if (qemu_strtou64(*p, NULL, 0, &reg) == 0 && reg < 32) {
+            lata_trace_vec_mask |= 1u << reg;
+        }
+    }
+    if (!lata_trace_vec_mask) {
+        lata_trace_vec_mask = UINT32_MAX;
+    }
+}
+
 void lata_options_parse_fp_precise(const char *arg)
 {
     if (arg) {
         option_fp_precise = atoi(arg);
     }
+}
+
+void lata_options_parse_dataflow_opt(const char *arg)
+{
+    if (arg) {
+        option_lata_dataflow_opt = atoi(arg);
+    }
+}
+
+void lata_options_enable_tu_stats(const char *arg)
+{
+    option_lata_tu_stats = !arg || atoi(arg) != 0;
+}
+
+void lata_options_enable_fam_stats(const char *arg)
+{
+    option_lata_fam_stats = !arg || atoi(arg) != 0;
 }

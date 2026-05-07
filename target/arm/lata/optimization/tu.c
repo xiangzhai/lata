@@ -13,6 +13,7 @@
 #include "qemu/cacheflush.h"
 #include "target/arm/lata/include/translate-a64.h"
 #include "target/arm/lata/include/lata-debug.h"
+#include "target/arm/lata/include/dataflow.h"
 #include "tu.h"
 #include "disas/disas.h"
 
@@ -254,6 +255,7 @@ bool lata_tu_edge_need_relink(TranslationBlock *tb, int n)
 
 static void tu_reset_tb(TranslationBlock *tb)
 {
+    lata_df_reset_tb(tb);
     qemu_spin_init(&tb->jmp_lock);
     tb->jmp_dest[0] = (uintptr_t)NULL;
     tb->jmp_dest[1] = (uintptr_t)NULL;
@@ -1495,6 +1497,8 @@ void translate_tu(TranslationBlock **tb_list)
 
     qatomic_set(&tcg_ctx->code_gen_ptr, (void *)
             ROUND_UP((uintptr_t)tcg_ctx->code_gen_ptr, CODE_GEN_ALIGN));
+
+    lata_df_analyze_tu(tb_list, tb_num_in_tu);
 
     for (uint32_t i = 0; i < tb_num_in_tu; i++) {
         tu_data->curr_num = i;

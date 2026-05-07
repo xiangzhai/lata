@@ -22,6 +22,9 @@
 #include "trace.h"
 #include "disas/disas.h"
 #include "exec/exec-all.h"
+#ifdef CONFIG_LATA
+#include "target/arm/lata/include/dataflow-lifecycle.h"
+#endif
 #include "tcg/tcg.h"
 #if defined(CONFIG_USER_ONLY)
 #include "qemu.h"
@@ -68,6 +71,7 @@
 #ifdef CONFIG_LATA
 #include "target/arm/tcg/translate.h"
 #include "target/arm/lata/include/lata-debug.h"
+#include "target/arm/lata/include/dataflow.h"
 #include "target/arm/lata/include/translate.h"
 #include "target/arm/lata/include/translate-a64.h"
 #endif
@@ -280,6 +284,7 @@ int tr_translate_tb(struct TranslationBlock *tb)
     gen_code_buf = tcg_ctx->code_gen_ptr;
     if (option_lata_dump_ir1) {
         lata_debug_dump_ir1(tb);
+        lata_df_dump_tb(tb);
     }
     tr_ir2_generate(tb);
     if (option_lata_dump_ir2) {
@@ -402,6 +407,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
 #endif
 #ifdef CONFIG_LATA
     /* Initialize goto_tb jump offsets. */
+    lata_df_reset_tb(tb);
     tb->jmp_reset_offset[0] = TB_JMP_OFFSET_INVALID;
     tb->jmp_reset_offset[1] = TB_JMP_OFFSET_INVALID;
     tb->jmp_insn_offset[0] = TB_JMP_OFFSET_INVALID;
