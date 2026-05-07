@@ -195,6 +195,8 @@ void lata_gen_exit_tb_ret_0(DisasContext* s)
 {
     IR2_OPND ir2_opnd_addr;
 
+    lata_vec_materialize_all_dirty();
+
     int64_t curr_ins_pos = (unsigned long)s->base->tb->tc.ptr + (lsenv->tr_data->real_ir2_inst_num << 2);
     int64_t exit_offset = context_switch_native_to_bt_ret_0 - curr_ins_pos;
 
@@ -271,6 +273,7 @@ void lata_emit_tu_unlink_stub(uint64_t guest_pc)
     IR2_OPND ir2_opnd_addr;
     TranslationBlock *tb = lsenv->tr_data->curr_tb;
 
+    lata_vec_materialize_all_dirty();
     lata_gen_a64_update_pc_value(guest_pc);
     li_d(a0_ir2_opnd, 0);
 
@@ -373,6 +376,309 @@ static void lata_compute_reg_offset_addr(IR2_OPND dst, IR2_OPND base,
 {
     la_add_d(dst, base, offset);
     la_bstrpick_d(dst, dst, 47, 0);
+}
+
+static unsigned fp_type_to_vec_size(unsigned type)
+{
+    return type == 3 ? 1 : type == 0 ? 2 : 3;
+}
+
+static bool simm_fits(int64_t value, unsigned bits)
+{
+    int64_t min = -(1LL << (bits - 1));
+    int64_t max = (1LL << (bits - 1)) - 1;
+
+    return value >= min && value <= max;
+}
+
+static int elem_shift_from_bytes(unsigned bytes)
+{
+    switch (bytes) {
+    case 1:
+        return 0;
+    case 2:
+        return 1;
+    case 4:
+        return 2;
+    case 8:
+        return 3;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static bool scaled_elem_offset(int64_t byte_offset, unsigned bytes,
+                               unsigned bits, int *scaled)
+{
+    int shift = elem_shift_from_bytes(bytes);
+
+    if (byte_offset & ((1 << shift) - 1)) {
+        return false;
+    }
+    byte_offset >>= shift;
+    if (!simm_fits(byte_offset, bits)) {
+        return false;
+    }
+    *scaled = byte_offset;
+    return true;
+}
+
+static IR2_OPND addr_with_const_offset(IR2_OPND base, int64_t byte_offset,
+                                       IR2_OPND scratch)
+{
+    if (byte_offset == 0) {
+        return base;
+    }
+    li_d(scratch, byte_offset);
+    la_add_d(scratch, base, scratch);
+    return scratch;
+}
+
+static bool vec_high_live_after_write(unsigned reg, unsigned size)
+{
+    return lata_df_vec_high_local_live_after_write(reg, size);
+}
+
+static void fpr_clear_high_d(IR2_OPND vreg)
+{
+    la_vinsgr2vr_d(vreg, zero_ir2_opnd, 1);
+}
+
+static void fpr_clear_high_small(IR2_OPND vreg, unsigned bytes)
+{
+    IR2_OPND vtmp = ra_alloc_ftemp();
+
+    la_vori_b(vtmp, vreg, 0);
+    la_vxor_v(vreg, vreg, vreg);
+    if (bytes == 1) {
+        la_vextrins_b(vreg, vtmp, 0);
+    } else if (bytes == 2) {
+        la_vextrins_h(vreg, vtmp, 0);
+    } else {
+        lsassert(bytes == 4);
+        la_vextrins_w(vreg, vtmp, 0);
+    }
+    free_alloc_fpr(vtmp);
+}
+
+static void fpr_clear_high(IR2_OPND vreg, unsigned size)
+{
+    switch (size) {
+    case 0:
+        fpr_clear_high_small(vreg, 1);
+        break;
+    case 1:
+        fpr_clear_high_small(vreg, 2);
+        break;
+    case 2:
+        fpr_clear_high_small(vreg, 4);
+        break;
+    case 3:
+        fpr_clear_high_d(vreg);
+        break;
+    default:
+        break;
+    }
+}
+
+static bool fpr_clear_high_if_live(IR2_OPND vreg, unsigned reg, unsigned size)
+{
+    if (vec_high_live_after_write(reg, size)) {
+        fpr_clear_high(vreg, size);
+        return true;
+    }
+    return false;
+}
+
+static void store_scalar_fpr_dst(unsigned reg, IR2_OPND opnd, unsigned size,
+                                 bool high_clean)
+{
+    store_fpr_dst(reg, opnd);
+    if (!high_clean) {
+        lata_vec_mark_dirty(reg, size);
+    }
+}
+
+static void vldrepl_elem(IR2_OPND dst, IR2_OPND base, int64_t byte_offset,
+                         unsigned bytes, IR2_OPND scratch)
+{
+    static const unsigned bits_by_shift[] = { 12, 11, 10, 9 };
+    int scaled;
+    int shift = elem_shift_from_bytes(bytes);
+
+    if (!scaled_elem_offset(byte_offset, bytes, bits_by_shift[shift], &scaled)) {
+        base = addr_with_const_offset(base, byte_offset, scratch);
+        scaled = 0;
+    }
+    switch (bytes) {
+    case 1:
+        la_vldrepl_b(dst, base, scaled);
+        break;
+    case 2:
+        la_vldrepl_h(dst, base, scaled);
+        break;
+    case 4:
+        la_vldrepl_w(dst, base, scaled);
+        break;
+    case 8:
+        la_vldrepl_d(dst, base, scaled);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void vstelm_elem(IR2_OPND src, IR2_OPND base, int64_t byte_offset,
+                        unsigned bytes, unsigned lane, IR2_OPND scratch)
+{
+    int scaled;
+
+    lsassert(lane < (16 / bytes));
+    if (!scaled_elem_offset(byte_offset, bytes, 8, &scaled)) {
+        base = addr_with_const_offset(base, byte_offset, scratch);
+        scaled = 0;
+    }
+    switch (bytes) {
+    case 1:
+        la_vstelm_b(src, base, scaled, lane);
+        break;
+    case 2:
+        la_vstelm_h(src, base, scaled, lane);
+        break;
+    case 4:
+        la_vstelm_w(src, base, scaled, lane);
+        break;
+    case 8:
+        la_vstelm_d(src, base, scaled, lane);
+        break;
+    default:
+        g_assert_not_reached();
+    }
+}
+
+static void fpu_load(IR2_OPND dst, IR2_OPND base, int64_t byte_offset,
+                     unsigned size, IR2_OPND scratch)
+{
+    IR2_OPND addr = base;
+    int64_t imm = byte_offset;
+
+    if (!simm_fits(byte_offset, 12)) {
+        addr = addr_with_const_offset(base, byte_offset, scratch);
+        imm = 0;
+    }
+    if (size == 2) {
+        la_fld_s(dst, addr, imm);
+    } else {
+        lsassert(size == 3);
+        la_fld_d(dst, addr, imm);
+    }
+}
+
+static void fpu_store(IR2_OPND src, IR2_OPND base, int64_t byte_offset,
+                      unsigned size, IR2_OPND scratch)
+{
+    IR2_OPND addr = base;
+    int64_t imm = byte_offset;
+
+    if (!simm_fits(byte_offset, 12)) {
+        addr = addr_with_const_offset(base, byte_offset, scratch);
+        imm = 0;
+    }
+    if (size == 2) {
+        la_fst_s(src, addr, imm);
+    } else {
+        lsassert(size == 3);
+        la_fst_d(src, addr, imm);
+    }
+}
+
+static void vector_load(IR2_OPND dst, IR2_OPND base, int64_t byte_offset,
+                        IR2_OPND scratch)
+{
+    IR2_OPND addr = base;
+    int64_t imm = byte_offset;
+
+    if (!simm_fits(byte_offset, 12)) {
+        addr = addr_with_const_offset(base, byte_offset, scratch);
+        imm = 0;
+    }
+    la_vld(dst, addr, imm);
+}
+
+static void vector_store(IR2_OPND src, IR2_OPND base, int64_t byte_offset,
+                         IR2_OPND scratch)
+{
+    IR2_OPND addr = base;
+    int64_t imm = byte_offset;
+
+    if (!simm_fits(byte_offset, 12)) {
+        addr = addr_with_const_offset(base, byte_offset, scratch);
+        imm = 0;
+    }
+    la_vst(src, addr, imm);
+}
+
+static void vector_store_to_env(unsigned reg, IR2_OPND src)
+{
+    IR2_OPND scratch = ra_alloc_itemp();
+
+    vector_store(src, env_ir2_opnd, env_offset_fpr(reg), scratch);
+    free_alloc_gpr(scratch);
+}
+
+static bool scalar_elem_load(IR2_OPND dst, IR2_OPND base, int64_t byte_offset,
+                             unsigned size, unsigned guest_reg)
+{
+    unsigned bytes = 1u << size;
+    bool high_clean = vec_high_live_after_write(guest_reg, size);
+
+    if (!high_clean) {
+        if (size == 2) {
+            IR2_OPND scratch = ra_alloc_itemp();
+            fpu_load(dst, base, byte_offset, size, scratch);
+            free_alloc_gpr(scratch);
+        } else if (size == 3) {
+            IR2_OPND scratch = ra_alloc_itemp();
+            fpu_load(dst, base, byte_offset, size, scratch);
+            free_alloc_gpr(scratch);
+        } else {
+            IR2_OPND scratch = ra_alloc_itemp();
+            vldrepl_elem(dst, base, byte_offset, bytes, scratch);
+            free_alloc_gpr(scratch);
+        }
+        return false;
+    }
+
+    if (size == 2) {
+        IR2_OPND vtmp = ra_alloc_ftemp();
+        IR2_OPND scratch = ra_alloc_itemp();
+
+        la_vxor_v(dst, dst, dst);
+        fpu_load(vtmp, base, byte_offset, size, scratch);
+        la_vextrins_w(dst, vtmp, 0);
+        free_alloc_gpr(scratch);
+        free_alloc_fpr(vtmp);
+    } else if (size == 3) {
+        IR2_OPND scratch = ra_alloc_itemp();
+
+        fpu_load(dst, base, byte_offset, size, scratch);
+        fpr_clear_high_d(dst);
+        free_alloc_gpr(scratch);
+    } else {
+        IR2_OPND vtmp = ra_alloc_ftemp();
+        IR2_OPND scratch = ra_alloc_itemp();
+
+        la_vxor_v(dst, dst, dst);
+        vldrepl_elem(vtmp, base, byte_offset, bytes, scratch);
+        if (size == 0) {
+            la_vextrins_b(dst, vtmp, 0);
+        } else {
+            la_vextrins_h(dst, vtmp, 0);
+        }
+        free_alloc_gpr(scratch);
+        free_alloc_fpr(vtmp);
+    }
+    return true;
 }
 
 
@@ -491,7 +797,7 @@ static void lata_helper_addl_saturate_s64(DisasContext* ctx, IR2_OPND vreg_d, IR
     la_vinsgr2vr_d(vreg_d, a0_ir2_opnd, 1);
 
     if (rd != -1)
-        la_vst(vreg_d, env_ir2_opnd, env_offset_fpr(rd));
+        vector_store_to_env(rd, vreg_d);
 
     lata_gen_call_helper_epilogue(tcg_ctx);
 
@@ -536,7 +842,7 @@ static void lata_helper_addl_saturate_s32(DisasContext* ctx, IR2_OPND vreg_d, IR
     la_jirl(ra_ir2_opnd, temp, 0);
     la_vinsgr2vr_w(vreg_d, a0_ir2_opnd, 3);
     if (rd != -1)
-        la_vst(vreg_d, env_ir2_opnd, env_offset_fpr(rd));
+        vector_store_to_env(rd, vreg_d);
 
     lata_gen_call_helper_epilogue(tcg_ctx);
     free_alloc_gpr(temp);
@@ -1029,6 +1335,8 @@ static void gen_goto_tb(DisasContext* s, int n, int64_t diff)
     IR2_OPND ir2_opnd_addr;
     TranslationBlock* tb = lsenv->tr_data->curr_tb;
 
+    lata_vec_materialize_all_dirty();
+
 #ifdef CONFIG_LATA_TU
     if (tb && tb->next_tb[n] != NULL) {
         la_label(goto_label);
@@ -1072,6 +1380,7 @@ static void gen_goto_tb_nochain(DisasContext* s, int64_t diff)
     IR2_OPND ir2_opnd_addr;
     TranslationBlock* tb = lsenv->tr_data->curr_tb;
 
+    lata_vec_materialize_all_dirty();
     lata_gen_a64_update_pc(s, diff);
     li_d(a0_ir2_opnd, 0);
 
@@ -1098,6 +1407,7 @@ static void gen_tu_b_edge(DisasContext *s, int n, int64_t diff)
     IR2_OPND ir2_opnd_addr;
     TranslationBlock *tb = lsenv->tr_data->curr_tb;
 
+    lata_vec_materialize_all_dirty();
     la_label(goto_label);
     lata_tu_edge_emit_branch(tb, n, ir2_opnd_label_id(&goto_label),
                              s->pc_curr + diff);
@@ -3830,19 +4140,19 @@ static bool trans_STP_v(DisasContext* s)
     lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
 
     if (!a->w && offset) { // wback = false && offset!=0
-        la_addi_d(temp, reg_n, offset);
+        IR2_OPND addr = addr_with_const_offset(reg_n, offset, temp);
         switch (dbytes) {
             case 4:
-                la_fst_s(vreg_t, temp, 0);
-                la_fst_s(vreg_t2, temp, dbytes);
+                fpu_store(vreg_t, addr, 0, 2, temp);
+                fpu_store(vreg_t2, addr, dbytes, 2, temp);
                 break;
             case 8:
-                la_fst_d(vreg_t, temp, 0);
-                la_fst_d(vreg_t2, temp, dbytes);
+                fpu_store(vreg_t, addr, 0, 3, temp);
+                fpu_store(vreg_t2, addr, dbytes, 3, temp);
                 break;
             case 16:
-                la_vst(vreg_t, temp, 0);
-                la_vst(vreg_t2, temp, dbytes);
+                vector_store(vreg_t, addr, 0, temp);
+                vector_store(vreg_t2, addr, dbytes, temp);
                 break;
             default:
                 lata_unallocated_encoding(s);
@@ -3855,16 +4165,16 @@ static bool trans_STP_v(DisasContext* s)
 
         switch (dbytes) {
             case 4:
-                la_fst_s(vreg_t, reg_n, 0);
-                la_fst_s(vreg_t2, reg_n, dbytes);
+                fpu_store(vreg_t, reg_n, 0, 2, temp);
+                fpu_store(vreg_t2, reg_n, dbytes, 2, temp);
                 break;
             case 8:
-                la_fst_d(vreg_t, reg_n, 0);
-                la_fst_d(vreg_t2, reg_n, dbytes);
+                fpu_store(vreg_t, reg_n, 0, 3, temp);
+                fpu_store(vreg_t2, reg_n, dbytes, 3, temp);
                 break;
             case 16:
-                la_vst(vreg_t, reg_n, 0);
-                la_vst(vreg_t2, reg_n, dbytes);
+                vector_store(vreg_t, reg_n, 0, temp);
+                vector_store(vreg_t2, reg_n, dbytes, temp);
                 break;
             default:
                 lata_unallocated_encoding(s);
@@ -3903,29 +4213,29 @@ static bool trans_LDP_v(DisasContext* s)
     IR2_OPND vreg_t = alloc_fpr_dst(a->rt);
     IR2_OPND vreg_t2 = alloc_fpr_dst(a->rt2);
     IR2_OPND temp = ra_alloc_itemp();
+    bool high_clean_t = true;
+    bool high_clean_t2 = true;
 
     if (clearGprHigh && arm_la_map[a->rn] >= 0) { /* all reg_n is 64-bit size*/
         clear_gpr_high(a->rn);
     }
 
     if (!a->w && offset) { // wback = false && offset!=0
-        la_addi_d(temp, reg_n, offset);
+        IR2_OPND addr = addr_with_const_offset(reg_n, offset, temp);
         switch (dbytes) {
             case 4:
-                la_vsub_d(vreg_t, vreg_t, vreg_t);
-                la_vsub_d(vreg_t2, vreg_t2, vreg_t2);
-                la_fld_s(vreg_t, temp, 0);
-                la_fld_s(vreg_t2, temp, dbytes);
+                high_clean_t = scalar_elem_load(vreg_t, addr, 0, 2, a->rt);
+                high_clean_t2 = scalar_elem_load(vreg_t2, addr, dbytes, 2,
+                                                 a->rt2);
                 break;
             case 8:
-                la_vsub_d(vreg_t, vreg_t, vreg_t);
-                la_vsub_d(vreg_t2, vreg_t2, vreg_t2);
-                la_fld_d(vreg_t, temp, 0);
-                la_fld_d(vreg_t2, temp, dbytes);
+                high_clean_t = scalar_elem_load(vreg_t, addr, 0, 3, a->rt);
+                high_clean_t2 = scalar_elem_load(vreg_t2, addr, dbytes, 3,
+                                                 a->rt2);
                 break;
             case 16:
-                la_vld(vreg_t, temp, 0);
-                la_vld(vreg_t2, temp, dbytes);
+                vector_load(vreg_t, addr, 0, temp);
+                vector_load(vreg_t2, addr, dbytes, temp);
                 break;
             default:
                 lata_unallocated_encoding(s);
@@ -3938,37 +4248,41 @@ static bool trans_LDP_v(DisasContext* s)
 
         switch (dbytes) {
             case 4:
-                la_vsub_d(vreg_t, vreg_t, vreg_t);
-                la_vsub_d(vreg_t2, vreg_t2, vreg_t2);
                 if (a->rn != a->rt && a->rn != a->rt2) {
-                    la_fld_s(vreg_t, reg_n, 0);
-                    la_fld_s(vreg_t2, reg_n, dbytes);
+                    high_clean_t = scalar_elem_load(vreg_t, reg_n, 0, 2,
+                                                    a->rt);
+                    high_clean_t2 = scalar_elem_load(vreg_t2, reg_n, dbytes,
+                                                     2, a->rt2);
                 } else { // read vs write
                     la_or(temp, reg_n, zero_ir2_opnd);
-                    la_fld_s(vreg_t, temp, 0);
-                    la_fld_s(vreg_t2, temp, dbytes);
+                    high_clean_t = scalar_elem_load(vreg_t, temp, 0, 2,
+                                                    a->rt);
+                    high_clean_t2 = scalar_elem_load(vreg_t2, temp, dbytes,
+                                                     2, a->rt2);
                 }
                 break;
             case 8:
-                la_vsub_d(vreg_t, vreg_t, vreg_t);
-                la_vsub_d(vreg_t2, vreg_t2, vreg_t2);
                 if (a->rn != a->rt && a->rn != a->rt2) {
-                    la_fld_d(vreg_t, reg_n, 0);
-                    la_fld_d(vreg_t2, reg_n, dbytes);
+                    high_clean_t = scalar_elem_load(vreg_t, reg_n, 0, 3,
+                                                    a->rt);
+                    high_clean_t2 = scalar_elem_load(vreg_t2, reg_n, dbytes,
+                                                     3, a->rt2);
                 } else { // read vs write
                     la_or(temp, reg_n, zero_ir2_opnd);
-                    la_fld_d(vreg_t, temp, 0);
-                    la_fld_d(vreg_t2, temp, dbytes);
+                    high_clean_t = scalar_elem_load(vreg_t, temp, 0, 3,
+                                                    a->rt);
+                    high_clean_t2 = scalar_elem_load(vreg_t2, temp, dbytes,
+                                                     3, a->rt2);
                 }
                 break;
             case 16:
                 if (a->rn != a->rt && a->rn != a->rt2) {
-                    la_vld(vreg_t, reg_n, 0);
-                    la_vld(vreg_t2, reg_n, dbytes);
+                    vector_load(vreg_t, reg_n, 0, temp);
+                    vector_load(vreg_t2, reg_n, dbytes, temp);
                 } else { // read vs write
                     la_or(temp, reg_n, zero_ir2_opnd);
-                    la_vld(vreg_t, temp, 0);
-                    la_vld(vreg_t2, temp, dbytes);
+                    vector_load(vreg_t, temp, 0, temp);
+                    vector_load(vreg_t2, temp, dbytes, temp);
                 }
                 break;
             default:
@@ -3982,8 +4296,15 @@ static bool trans_LDP_v(DisasContext* s)
             store_gpr_dst(a->rn, reg_n);
     }
 
-    store_fpr_dst(a->rt, vreg_t);
-    store_fpr_dst(a->rt2, vreg_t2);
+    if (dbytes == 4 || dbytes == 8) {
+        store_scalar_fpr_dst(a->rt, vreg_t, dbytes == 4 ? 2 : 3,
+                             high_clean_t);
+        store_scalar_fpr_dst(a->rt2, vreg_t2, dbytes == 4 ? 2 : 3,
+                             high_clean_t2);
+    } else {
+        store_fpr_dst(a->rt, vreg_t);
+        store_fpr_dst(a->rt2, vreg_t2);
+    }
     free_alloc_gpr(reg_n);
     free_alloc_fpr(vreg_t);
     free_alloc_fpr(vreg_t2);
@@ -4187,46 +4508,30 @@ static bool trans_LDR_i(DisasContext* s)
 static void assist_trans_STR_v_i(DisasContext *s, IR2_OPND* vreg_t,
                                  IR2_OPND* reg_n, int64_t offset, uint64_t sz)
 {
-    IR2_OPND temp = ra_alloc_itemp();
-    IR2_OPND addr = *reg_n;
+    IR2_OPND scratch = ra_alloc_itemp();
     uint32_t size = sz == 4 ? 16 : (1u << sz);
 
-    if (offset) {
-        li_d(temp, offset);
-        la_add_d(temp, *reg_n, temp);
-        addr = temp;
+    if (lata_trace_mem) {
+        IR2_OPND addr = offset ? addr_with_const_offset(*reg_n, offset,
+                                                        scratch) : *reg_n;
+        lata_gen_trace_mem_store(s, addr, size, true);
     }
-    lata_gen_trace_mem_store(s, addr, size, true);
     switch (sz) {
         case 0:
-            if (offset) {
-                la_addi_d(temp, *reg_n, offset);
-                la_vstelm_b(*vreg_t, temp, 0, 0);
-            } else {
-                la_vstelm_b(*vreg_t, *reg_n, 0, 0);
-            }
-            break;
         case 1:
-            if (offset) {
-                la_addi_d(temp, *reg_n, offset);
-                la_vstelm_h(*vreg_t, temp, 0, 0);
-            } else {
-                la_vstelm_h(*vreg_t, *reg_n, 0, 0);
-            }
+            vstelm_elem(*vreg_t, *reg_n, offset, size, 0, scratch);
             break;
         case 2:
-            la_fst_s(*vreg_t, *reg_n, offset);
-            break;
         case 3:
-            la_fst_d(*vreg_t, *reg_n, offset);
+            fpu_store(*vreg_t, *reg_n, offset, sz, scratch);
             break;
         case 4:
-            la_vst(*vreg_t, *reg_n, offset);
+            vector_store(*vreg_t, *reg_n, offset, scratch);
             break;
         default:
             assert(0);
     }
-    free_alloc_gpr(temp);
+    free_alloc_gpr(scratch);
 }
 
 static bool trans_STR_v_i(DisasContext* s)
@@ -4282,36 +4587,29 @@ static bool trans_STR_v_i(DisasContext* s)
     return true;
 }
 
-static void assist_trans_LDR_v_i(IR2_OPND* vreg_t, IR2_OPND* reg_n, int64_t offset, uint64_t sz)
+static bool assist_trans_LDR_v_i(IR2_OPND* vreg_t, IR2_OPND* reg_n,
+                                 int64_t offset, uint64_t sz, unsigned rt)
 {
-    IR2_OPND temp = ra_alloc_itemp();
+    bool high_clean = true;
+
     switch (sz) {
         case 0:
-            la_vxor_v(*vreg_t, *vreg_t, *vreg_t);
-            la_ld_bu(temp, *reg_n, offset);
-            la_vinsgr2vr_b(*vreg_t, temp, 0);
-            break;
         case 1:
-            la_vxor_v(*vreg_t, *vreg_t, *vreg_t);
-            la_ld_hu(temp, *reg_n, offset);
-            la_vinsgr2vr_h(*vreg_t, temp, 0);
-            break;
         case 2:
-            la_fld_s(*vreg_t, *reg_n, offset);
-            la_vand_v(*vreg_t, *vreg_t, fsmask_ir2_opnd);
-            break;
         case 3:
-            la_fld_d(*vreg_t, *reg_n, offset);
-            /* 高64位清零 */
-            la_vinsgr2vr_d(*vreg_t, zero_ir2_opnd, 1);
+            high_clean = scalar_elem_load(*vreg_t, *reg_n, offset, sz, rt);
             break;
         case 4:
-            la_vld(*vreg_t, *reg_n, offset);
+        {
+            IR2_OPND scratch = ra_alloc_itemp();
+            vector_load(*vreg_t, *reg_n, offset, scratch);
+            free_alloc_gpr(scratch);
             break;
+        }
         default:
             assert(0);
     }
-    free_alloc_gpr(temp);
+    return high_clean;
 }
 
 static bool trans_LDR_v_i(DisasContext* s)
@@ -4325,6 +4623,7 @@ static bool trans_LDR_v_i(DisasContext* s)
 
     arg_ldst_imm* a = &(s->arg.f_ldst_imm);
     int64_t offset = a->imm;
+    bool high_clean = true;
 
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
     IR2_OPND vreg_t = alloc_fpr_dst(a->rt);
@@ -4344,17 +4643,19 @@ static bool trans_LDR_v_i(DisasContext* s)
             IR2_OPND temp = ra_alloc_itemp();
             li_d(temp, offset);
             la_add_d(temp, reg_n, temp);
-            assist_trans_LDR_v_i(&vreg_t, &temp, 0, a->sz);
+            high_clean = assist_trans_LDR_v_i(&vreg_t, &temp, 0, a->sz,
+                                              a->rt);
             free_alloc_gpr(temp);
         } else {
-            assist_trans_LDR_v_i(&vreg_t, &reg_n, offset, a->sz);
+            high_clean = assist_trans_LDR_v_i(&vreg_t, &reg_n, offset, a->sz,
+                                              a->rt);
         }
     } else { // Post-index
         if (!a->p && offset) {
             la_addi_d(reg_n, reg_n, offset);
         }
 
-        assist_trans_LDR_v_i(&vreg_t, &reg_n, 0, a->sz);
+        high_clean = assist_trans_LDR_v_i(&vreg_t, &reg_n, 0, a->sz, a->rt);
 
         if (a->p && offset) {
             la_addi_d(reg_n, reg_n, offset);
@@ -4363,7 +4664,11 @@ static bool trans_LDR_v_i(DisasContext* s)
             store_gpr_dst(a->rn, reg_n);
     }
 
-    store_fpr_dst(a->rt, vreg_t);
+    if (a->sz < 4) {
+        store_scalar_fpr_dst(a->rt, vreg_t, a->sz, high_clean);
+    } else {
+        store_fpr_dst(a->rt, vreg_t);
+    }
     free_alloc_gpr(reg_n);
     free_alloc_fpr(vreg_t);
     return true;
@@ -4667,6 +4972,7 @@ static bool trans_LDR_v(DisasContext* s)
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
     IR2_OPND reg_m = alloc_gpr_src(a->rm);
     IR2_OPND temp = ra_alloc_itemp();
+    bool high_clean = true;
 
     if (clearGprHigh && arm_la_map[a->rn] >= 0) { /* all reg_n is 64-bit size*/
         clear_gpr_high(a->rn);
@@ -4727,26 +5033,13 @@ static bool trans_LDR_v(DisasContext* s)
         lata_compute_reg_offset_addr(temp, reg_n, reg_m);
         switch (a->sz) {
             case 0:
-                la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ld_bu(temp, temp, 0);
-                la_vinsgr2vr_b(vreg_t, temp, 0);
-                break;
             case 1:
-                la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ld_hu(temp, temp, 0);
-                la_vinsgr2vr_h(vreg_t, temp, 0);
-                break;
             case 2:
-                la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ld_wu(temp, temp, 0);
-                la_vinsgr2vr_w(vreg_t, temp, 0);
-                break;
             case 3:
-                la_fld_d(vreg_t, temp, 0);
-                la_vinsgr2vr_d(vreg_t, zero_ir2_opnd, 1);
+                high_clean = scalar_elem_load(vreg_t, temp, 0, a->sz, a->rt);
                 break;
             case 4:
-                la_vld(vreg_t, temp, 0);
+                vector_load(vreg_t, temp, 0, temp);
                 break;
             default:
                 break;
@@ -4764,33 +5057,24 @@ static bool trans_LDR_v(DisasContext* s)
         lata_compute_reg_offset_addr(temp, reg_n, temp);
         switch (a->sz) {
             case 0:
-                la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ld_bu(temp, temp, 0);
-                la_vinsgr2vr_b(vreg_t, temp, 0);
-                break;
             case 1:
-                la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ld_hu(temp, temp, 0);
-                la_vinsgr2vr_h(vreg_t, temp, 0);
-                break;
             case 2:
-                la_vxor_v(vreg_t, vreg_t, vreg_t);
-                la_ld_wu(temp, temp, 0);
-                la_vinsgr2vr_w(vreg_t, temp, 0);
-                break;
             case 3:
-                la_fld_d(vreg_t, temp, 0);
-                la_vinsgr2vr_d(vreg_t, zero_ir2_opnd, 1);
+                high_clean = scalar_elem_load(vreg_t, temp, 0, a->sz, a->rt);
                 break;
             case 4:
-                la_vld(vreg_t, temp, 0);
+                vector_load(vreg_t, temp, 0, temp);
                 break;
             default:
                 break;
         }
     }
 
-    store_fpr_dst(a->rt, vreg_t);
+    if (a->sz < 4) {
+        store_scalar_fpr_dst(a->rt, vreg_t, a->sz, high_clean);
+    } else {
+        store_fpr_dst(a->rt, vreg_t);
+    }
     free_alloc_fpr(vreg_t);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(reg_m);
@@ -4864,21 +5148,15 @@ static bool trans_STR_v(DisasContext* s)
         lata_compute_reg_offset_addr(temp, reg_n, reg_m);
         switch (a->sz) {
             case 0:
-                la_vpickve2gr_bu(temp1, vreg_t, 0);
-                la_st_b(temp1, temp, 0);
-                break;
             case 1:
-                la_vpickve2gr_hu(temp1, vreg_t, 0);
-                la_st_h(temp1, temp, 0);
+                vstelm_elem(vreg_t, temp, 0, 1u << a->sz, 0, temp1);
                 break;
             case 2:
-                la_fst_s(vreg_t, temp, 0);
-                break;
             case 3:
-                la_fst_d(vreg_t, temp, 0);
+                fpu_store(vreg_t, temp, 0, a->sz, temp1);
                 break;
             case 4:
-                la_vst(vreg_t, temp, 0);
+                vector_store(vreg_t, temp, 0, temp1);
                 break;
             default:
                 break;
@@ -4895,21 +5173,15 @@ static bool trans_STR_v(DisasContext* s)
         lata_compute_reg_offset_addr(temp, reg_n, temp);
         switch (a->sz) {
             case 0:
-                la_vpickve2gr_bu(temp1, vreg_t, 0);
-                la_st_b(temp1, temp, 0);
-                break;
             case 1:
-                la_vpickve2gr_hu(temp1, vreg_t, 0);
-                la_st_h(temp1, temp, 0);
+                vstelm_elem(vreg_t, temp, 0, 1u << a->sz, 0, temp1);
                 break;
             case 2:
-                la_fst_s(vreg_t, temp, 0);
-                break;
             case 3:
-                la_fst_d(vreg_t, temp, 0);
+                fpu_store(vreg_t, temp, 0, a->sz, temp1);
                 break;
             case 4:
-                la_vst(vreg_t, temp, 0);
+                vector_store(vreg_t, temp, 0, temp1);
                 break;
             default:
                 break;
@@ -5280,14 +5552,17 @@ static bool trans_LD_mult(DisasContext* s)
         for (int r = 0; r < a->rpt; r++) {
             int tt = (a->rt + r) % 32;
             int offset = r * vbytes;
-            assert(offset <= 2047 && offset >= -2048); /* vld的立即数是imm12 */
             vreg_d = alloc_fpr_dst(tt);
-            la_vld(vreg_d, reg_n, offset);
-            if (!a->q) {
-                /* 高64位清零 */
-                la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
+            if (a->q) {
+                IR2_OPND scratch = ra_alloc_itemp();
+                vector_load(vreg_d, reg_n, offset, scratch);
+                free_alloc_gpr(scratch);
+                store_fpr_dst(tt, vreg_d);
+            } else {
+                bool high_clean = scalar_elem_load(vreg_d, reg_n, offset, 3,
+                                                   tt);
+                store_scalar_fpr_dst(tt, vreg_d, 3, high_clean);
             }
-            store_fpr_dst(tt, vreg_d);
             free_alloc_fpr(vreg_d);
         }
     } else {                                    /* LD2/LD3/LD4, both are multiple structures */
@@ -5296,12 +5571,14 @@ static bool trans_LD_mult(DisasContext* s)
         total = a->selem * elements * ebytes;
 
         IR2_OPND vtemp = ra_alloc_ftemp();
+        IR2_OPND scratch = ra_alloc_itemp();
         for (int r = 0; r < a->selem; r++) {
             int tt = (a->rt + r) % 32;
             vreg_d = alloc_fpr_dst(tt);
+            la_vxor_v(vreg_d, vreg_d, vreg_d);
             for (int e = 0; e < elements; e++) {
                 int offset = (e * a->selem + r) * ebytes;
-                la_vld(vtemp, reg_n, offset);
+                vldrepl_elem(vtemp, reg_n, offset, ebytes, scratch);
                 switch (ebytes) {
                     case 1:
                         la_vextrins_b(vreg_d, vtemp, e << 4);
@@ -5320,12 +5597,15 @@ static bool trans_LD_mult(DisasContext* s)
                 }
             }
             if (!a->q) {
-                la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
+                bool high_clean = fpr_clear_high_if_live(vreg_d, tt, 3);
+                store_scalar_fpr_dst(tt, vreg_d, 3, high_clean);
+            } else {
+                store_fpr_dst(tt, vreg_d);
             }
 
-            store_fpr_dst(tt, vreg_d);
             free_alloc_fpr(vreg_d);
         }
+        free_alloc_gpr(scratch);
         free_alloc_fpr(vtemp);
     }
 
@@ -5389,13 +5669,16 @@ static bool trans_ST_mult(DisasContext* s)
         for (int r = 0; r < a->rpt; r++) {
             int tt = (a->rt + r) % 32;
             int offset = r * vbytes;
-            assert(offset <= 2047 && offset >= -2048); /* vld的立即数是imm12 */
             vreg_d = alloc_fpr_src(tt);
             if (a->q) {
-                la_vst(vreg_d, reg_n, offset);
+                IR2_OPND scratch = ra_alloc_itemp();
+                vector_store(vreg_d, reg_n, offset, scratch);
+                free_alloc_gpr(scratch);
             } else {
                 /* 这里和LD1有点差别，load多了可以高位清零，但是store不行 */
-                la_fst_d(vreg_d, reg_n, offset);
+                IR2_OPND scratch = ra_alloc_itemp();
+                fpu_store(vreg_d, reg_n, offset, 3, scratch);
+                free_alloc_gpr(scratch);
             }
             free_alloc_fpr(vreg_d);
         }
@@ -5407,26 +5690,13 @@ static bool trans_ST_mult(DisasContext* s)
         for (int r = 0; r < a->selem; r++) { /* structure elements 等于需要store的寄存器个数 */
             int tt = (a->rt + r) % 32;
             vreg_d = alloc_fpr_src(tt);
+            IR2_OPND scratch = ra_alloc_itemp();
             for (int e = 0; e < elements; e++) {
-                int offset = e * a->selem + r;
-                switch (ebytes) {
-                    case 1:
-                        la_vstelm_b(vreg_d, reg_n, offset, e);
-                        break;
-                    case 2:
-                        la_vstelm_h(vreg_d, reg_n, offset, e);
-                        break;
-                    case 4:
-                        la_vstelm_w(vreg_d, reg_n, offset, e);
-                        break;
-                    case 8:
-                        la_vstelm_d(vreg_d, reg_n, offset, e);
-                        break;
-                    default:
-                        break;
-                }
+                int offset = (e * a->selem + r) * ebytes;
+                vstelm_elem(vreg_d, reg_n, offset, ebytes, e, scratch);
             }
 
+            free_alloc_gpr(scratch);
             free_alloc_fpr(vreg_d);
         }
     }
@@ -5481,22 +5751,9 @@ static bool trans_ST_single(DisasContext* s)
 
     for (xs = 0, rt = a->rt; xs < a->selem; xs++, rt = (rt + 1) % 32) {
         vreg_d = alloc_fpr_src(rt);
-        switch (esize) {
-            case 1:
-                la_vstelm_b(vreg_d, reg_n, xs, a->index);
-                break;
-            case 2:
-                la_vstelm_h(vreg_d, reg_n, xs, a->index);
-                break;
-            case 4:
-                la_vstelm_w(vreg_d, reg_n, xs, a->index);
-                break;
-            case 8:
-                la_vstelm_d(vreg_d, reg_n, xs, a->index);
-                break;
-            default:
-                break;
-        }
+        IR2_OPND scratch = ra_alloc_itemp();
+        vstelm_elem(vreg_d, reg_n, xs * esize, esize, a->index, scratch);
+        free_alloc_gpr(scratch);
         free_alloc_fpr(vreg_d);
     }
 
@@ -5547,10 +5804,11 @@ static bool trans_LD_single(DisasContext* s)
     }
 
     vtemp = ra_alloc_ftemp();
+    IR2_OPND scratch = ra_alloc_itemp();
     for (xs = 0, rt = a->rt; xs < a->selem; xs++, rt = (rt + 1) % 32) {
         vreg_d = alloc_fpr_src(rt);
         int offset = xs * esize;
-        la_vld(vtemp, reg_n, offset);
+        vldrepl_elem(vtemp, reg_n, offset, esize, scratch);
         switch (esize) {
             case 1:
                 la_vextrins_b(vreg_d, vtemp, a->index << 4);
@@ -5588,6 +5846,7 @@ static bool trans_LD_single(DisasContext* s)
 
     store_gpr_dst(a->rn, reg_n);
     free_alloc_gpr(reg_n);
+    free_alloc_gpr(scratch);
     free_alloc_fpr(vtemp);
     return true;
 }
@@ -5619,29 +5878,18 @@ static bool trans_LD_single_repl(DisasContext* s)
     }
 
     for (xs = 0, rt = a->rt; xs < a->selem; xs++, rt = (rt + 1) % 32) {
+        IR2_OPND scratch = ra_alloc_itemp();
+        bool high_clean = true;
+
         vreg_d = alloc_fpr_dst(rt);
-        switch (esize) {
-            case 1:
-                la_vldrepl_b(vreg_d, reg_n, xs);
-                break;
-            case 2:
-                la_vldrepl_h(vreg_d, reg_n, xs);
-                break;
-            case 4:
-                la_vldrepl_w(vreg_d, reg_n, xs);
-                break;
-            case 8:
-                la_vldrepl_d(vreg_d, reg_n, xs);
-                break;
-            default:
-                lata_unallocated_encoding(s);
-                return true;
-        }
+        vldrepl_elem(vreg_d, reg_n, xs * esize, esize, scratch);
         if (!a->q) {
-            /* 高64位清零 */
-            la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
+            high_clean = fpr_clear_high_if_live(vreg_d, rt, 3);
+            store_scalar_fpr_dst(rt, vreg_d, 3, high_clean);
+        } else {
+            store_fpr_dst(rt, vreg_d);
         }
-        store_fpr_dst(rt, vreg_d);
+        free_alloc_gpr(scratch);
         free_alloc_fpr(vreg_d);
     }
 
@@ -8301,9 +8549,13 @@ static void disas_fp_csel(DisasContext* s, uint32_t insn)
 
     la_label(l_end);
 
-    /* 高64位清零 */
-    la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
-    store_fpr_dst(rd, vreg_d);
+    if (type == 0 || type == 1) {
+        bool high_clean = fpr_clear_high_if_live(vreg_d, rd,
+                                                 type == 0 ? 2 : 3);
+        store_scalar_fpr_dst(rd, vreg_d, type == 0 ? 2 : 3, high_clean);
+    } else {
+        store_fpr_dst(rd, vreg_d);
+    }
     free_alloc_fpr(vreg_d);
     free_alloc_fpr(vreg_n);
     free_alloc_fpr(vreg_m);
@@ -8377,11 +8629,13 @@ static void handle_fp_1src_half(DisasContext* s, int opcode, int rd, int rn)
     }
 
 do_convert_back:
+{
     /* Convert single→half back to get final result */
     la_vfcvt_h_s(vreg_d, vtemp_result, vtemp_result);
-    la_vand_v(vreg_d, vreg_d, fsmask_ir2_opnd);
+    bool high_clean = fpr_clear_high_if_live(vreg_d, rd, 1);
 
-    store_fpr_dst(rd, vreg_d);
+    store_scalar_fpr_dst(rd, vreg_d, 1, high_clean);
+}
     free_alloc_fpr(vreg_d);
     free_alloc_fpr(vreg_n);
     free_alloc_fpr(vtemp_s);
@@ -8471,9 +8725,11 @@ static void handle_fp_1src_single(DisasContext* s, int opcode, int rd, int rn)
     return;
 
 done:
-    la_vand_v(vreg_d, vreg_d, fsmask_ir2_opnd);
+{
+    bool high_clean = fpr_clear_high_if_live(vreg_d, rd, 2);
 
-    store_fpr_dst(rd, vreg_d);
+    store_scalar_fpr_dst(rd, vreg_d, 2, high_clean);
+}
     free_alloc_fpr(vreg_d);
     free_alloc_fpr(vreg_n);
     free_alloc_gpr(temp);
@@ -8559,10 +8815,11 @@ static void handle_fp_1src_double(DisasContext* s, int opcode, int rd, int rn)
     return;
 
 done:
-    /* 高64位清零 */
-    la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
+{
+    bool high_clean = fpr_clear_high_if_live(vreg_d, rd, 3);
 
-    store_fpr_dst(rd, vreg_d);
+    store_scalar_fpr_dst(rd, vreg_d, 3, high_clean);
+}
     free_alloc_fpr(vreg_d);
     free_alloc_fpr(vreg_n);
     free_alloc_gpr(temp);
@@ -8621,9 +8878,11 @@ static void handle_fp_fcvt(DisasContext* s, int opcode,
             g_assert_not_reached();
     }
 
-    /* 高64位清零 */
-    la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
-    store_fpr_dst(rd, vreg_d);
+    {
+        unsigned out_size = fp_type_to_vec_size(dtype);
+        bool high_clean = fpr_clear_high_if_live(vreg_d, rd, out_size);
+        store_scalar_fpr_dst(rd, vreg_d, out_size, high_clean);
+    }
     free_alloc_fpr(vreg_d);
     free_alloc_fpr(vreg_n);
 }
@@ -8816,9 +9075,9 @@ static void handle_fp_2src_single(DisasContext* s, int opcode,
             break;
     }
     sanitize_fpcr_dn(vreg_d, false);
-    la_vand_v(vreg_d, vreg_d, fsmask_ir2_opnd);
+    bool high_clean = fpr_clear_high_if_live(vreg_d, rd, 2);
 
-    store_fpr_dst(rd, vreg_d);
+    store_scalar_fpr_dst(rd, vreg_d, 2, high_clean);
     free_alloc_fpr(vreg_d);
     free_alloc_fpr(vreg_n);
     free_alloc_fpr(vreg_m);
@@ -8873,10 +9132,9 @@ static void handle_fp_2src_double(DisasContext* s, int opcode,
             la_fneg_d(vreg_d, vreg_d);
             break;
     }
-    /* 高64位清零 */
-    la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
+    bool high_clean = fpr_clear_high_if_live(vreg_d, rd, 3);
 
-    store_fpr_dst(rd, vreg_d);
+    store_scalar_fpr_dst(rd, vreg_d, 3, high_clean);
     free_alloc_fpr(vreg_d);
     free_alloc_fpr(vreg_n);
     free_alloc_fpr(vreg_m);
@@ -8972,9 +9230,9 @@ static void handle_fp_3src_single(DisasContext* s, bool o0, bool o1,
         }
     }
     sanitize_fpcr_dn(vreg_d, false);
-    la_vand_v(vreg_d, vreg_d, fsmask_ir2_opnd);
+    bool high_clean = fpr_clear_high_if_live(vreg_d, rd, 2);
 
-    store_fpr_dst(rd, vreg_d);
+    store_scalar_fpr_dst(rd, vreg_d, 2, high_clean);
     free_alloc_fpr(vreg_d);
     free_alloc_fpr(vreg_n);
     free_alloc_fpr(vreg_m);
@@ -9018,10 +9276,9 @@ static void handle_fp_3src_double(DisasContext* s, bool o0, bool o1,
             la_fmadd_d(vreg_d, vreg_n, vreg_m, vreg_a);
         }
     }
-    /* 高64位清零 */
-    la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
+    bool high_clean = fpr_clear_high_if_live(vreg_d, rd, 3);
 
-    store_fpr_dst(rd, vreg_d);
+    store_scalar_fpr_dst(rd, vreg_d, 3, high_clean);
     free_alloc_fpr(vreg_d);
     free_alloc_fpr(vreg_n);
     free_alloc_fpr(vreg_m);
@@ -9293,6 +9550,10 @@ static void handle_fpfpcvt(DisasContext* s, int rd, int rn, int opcode,
         IR2_OPND reg_n = alloc_gpr_src(rn);
         IR2_OPND vtemp = ra_alloc_ftemp();
 
+        if (sf && clearGprHigh && arm_la_map[rn] >= 0 && rn != 31) {
+            clear_gpr_high(rn);
+        }
+
         switch (type) {
             case 1: /* float64 */
                 if (sf) {
@@ -9384,9 +9645,11 @@ static void handle_fpfpcvt(DisasContext* s, int rd, int rn, int opcode,
             free_alloc_fpr(vscale);
             free_alloc_gpr(temp);
         }
-        la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
-
-        store_fpr_dst(rd, vreg_d);
+        {
+            unsigned out_size = fp_type_to_vec_size(type);
+            bool high_clean = fpr_clear_high_if_live(vreg_d, rd, out_size);
+            store_scalar_fpr_dst(rd, vreg_d, out_size, high_clean);
+        }
         free_alloc_fpr(vreg_d);
         free_alloc_fpr(vtemp);
         free_alloc_gpr(reg_n);
@@ -10061,17 +10324,20 @@ static void handle_fmov(DisasContext* s, int rd, int rn, int type, bool itof)
                 break;
             case 3:
                 /* 16 bit */
-                la_bstrpick_d(temp, reg_n, 16, 0);
+                la_bstrpick_d(temp, reg_n, 15, 0);
                 la_movgr2fr_d(vreg_d, temp);
                 break;
             default:
                 g_assert_not_reached();
         }
         if (type != 2) {
-            la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
-        }
+            unsigned out_size = fp_type_to_vec_size(type);
+            bool high_clean = fpr_clear_high_if_live(vreg_d, rd, out_size);
 
-        store_fpr_dst(rd, vreg_d);
+            store_scalar_fpr_dst(rd, vreg_d, out_size, high_clean);
+        } else {
+            store_fpr_dst(rd, vreg_d);
+        }
         free_alloc_fpr(vreg_d);
         free_alloc_gpr(reg_n);
         free_alloc_gpr(temp);
@@ -10178,7 +10444,7 @@ static void handle_fjcvtzs(DisasContext* s, int rd, int rn)
     li_d(tmp, s->base->pc_next);
     la_st_d(tmp, env_ir2_opnd, env_offset_pc());
     if (arm_la_fmap[rn] >= 0) {
-        la_vst(ir2_opnd_new(IR2_OPND_FPR, arm_la_fmap[rn]), env_ir2_opnd, env_offset_fpr(rn));
+        vector_store_to_env(rn, ir2_opnd_new(IR2_OPND_FPR, arm_la_fmap[rn]));
     }
     lata_gen_call_helper_prologue_no_flags(tcg_ctx);
     li_d(tmp, env_offset_fpr(rn));
@@ -10417,8 +10683,8 @@ static void disas_simd_ext(DisasContext* s, uint32_t insn)
             la_vbsll_v(vtemp1, vreg_m, 0x8 - imm4);
             la_vor_v(vreg_d, vtemp, vtemp1);
         }
-        /* 高64位清零 */
-        la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
+        bool high_clean = fpr_clear_high_if_live(vreg_d, rd, 3);
+        store_scalar_fpr_dst(rd, vreg_d, 3, high_clean);
     } else {
         if (imm4 == 0) {
             la_vori_b(vreg_d, vreg_n, 0);
@@ -13348,10 +13614,10 @@ static void handle_3same_float_scalar(DisasContext* s, int size, int fpopcode,
                 g_assert_not_reached();
         }
 
-        la_vand_v(vreg_d, vreg_d, fsmask_ir2_opnd);
+        bool high_clean = fpr_clear_high_if_live(vreg_d, rd, 2);
+        store_scalar_fpr_dst(rd, vreg_d, 2, high_clean);
     }
 
-    store_fpr_dst(rd, vreg_d);
     free_alloc_fpr(vreg_d);
     free_alloc_fpr(vreg_n);
     free_alloc_fpr(vreg_m);
@@ -14497,7 +14763,7 @@ static void handle_2misc_reciprocal(DisasContext* s, int opcode,
         IR2_OPND tmp2 = ra_alloc_itemp();
 
         la_addi_d(sp_ir2_opnd, sp_ir2_opnd, -16);
-        la_vst(vreg_n, sp_ir2_opnd, 0);
+        vector_store(vreg_n, sp_ir2_opnd, 0, t0_ir2_opnd);
         vreg_d = alloc_fpr_dst(rd);
 
         for (int i = 0; i < (is_q ? 4 : 2); i++) {
@@ -14527,7 +14793,7 @@ static void handle_2misc_reciprocal(DisasContext* s, int opcode,
         IR2_OPND limit = ra_alloc_itemp();
 
         la_addi_d(sp_ir2_opnd, sp_ir2_opnd, -16);
-        la_vst(vreg_n, sp_ir2_opnd, 0);
+        vector_store(vreg_n, sp_ir2_opnd, 0, t0_ir2_opnd);
         vreg_d = alloc_fpr_dst(rd);
 
         for (int i = 0; i < (is_q ? 4 : 2); i++) {
@@ -14788,8 +15054,7 @@ static bool gen_simd_fcvt_fpint_helper(DisasContext* s, int opcode,
     off = ra_alloc_itemp();
 
     if (arm_la_fmap[rn] >= 0) {
-        la_vst(ir2_opnd_new(IR2_OPND_FPR, arm_la_fmap[rn]),
-               env_ir2_opnd, env_offset_fpr(rn));
+        vector_store_to_env(rn, ir2_opnd_new(IR2_OPND_FPR, arm_la_fmap[rn]));
     }
 
     li_d(off, s->base->pc_next);
@@ -14842,8 +15107,8 @@ static bool gen_simd_fcvt_fpint_helper(DisasContext* s, int opcode,
 
     lata_gen_call_helper_epilogue(tcg_ctx);
     if (arm_la_fmap[rd] >= 0) {
-        la_vld(ir2_opnd_new(IR2_OPND_FPR, arm_la_fmap[rd]),
-               env_ir2_opnd, env_offset_fpr(rd));
+        vector_load(ir2_opnd_new(IR2_OPND_FPR, arm_la_fmap[rd]),
+                    env_ir2_opnd, env_offset_fpr(rd), off);
     }
     free_alloc_gpr(helper);
     free_alloc_gpr(off);
@@ -21977,6 +22242,7 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
     int ir1_nr = tb->icount;
     DisasContext* pir1 = (DisasContext*)tb->ir1;
     lata_df_begin_translate(tb);
+    lata_vec_dirty_reset();
     for (i = 0; i < ir1_nr; ++i) {
 #ifdef CONFIG_LATA_TU
         DisasContextBase tu_base = *pir1->base;

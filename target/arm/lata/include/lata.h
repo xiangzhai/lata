@@ -144,5 +144,10 @@ IR2_OPND alloc_fpr_src(int i);
 IR2_OPND alloc_fpr_dst(int i);
 void store_fpr_dst(int i, IR2_OPND opnd);
 void free_alloc_fpr(IR2_OPND opnd);
+void lata_vec_dirty_reset(void);
+void lata_vec_mark_dirty(unsigned reg, unsigned size);
+void lata_vec_mark_clean(unsigned reg);
+void lata_vec_materialize_dirty(unsigned reg);
+void lata_vec_materialize_all_dirty(void);
 
 #endif

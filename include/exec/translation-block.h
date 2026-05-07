@@ -271,6 +271,10 @@ struct TranslationBlock {
     uint32_t lata_df_vec_def;
     uint32_t lata_df_vec_live_in;
     uint32_t lata_df_vec_live_out;
+    uint32_t lata_df_vec_high_use[4];
+    uint32_t lata_df_vec_high_def[4];
+    uint32_t lata_df_vec_high_live_in[4];
+    uint32_t lata_df_vec_high_live_out[4];
     uint8_t lata_df_nzcv_use_mask;
     uint8_t lata_df_nzcv_def_mask;
     uint8_t lata_df_nzcv_live_in_mask;

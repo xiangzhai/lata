@@ -175,6 +175,7 @@ static __thread ENV lsenv_real;
 
 static __thread TRANSLATION_DATA tr_data_real;
 __thread TRANSLATION_DATA *tr_data;
+static __thread uint8_t lata_vec_dirty_size[32];
 
 bool lata_dump = 0;
 uint64_t context_switch_bt_to_native;
@@ -653,10 +654,88 @@ static void lata_flush_writes_before_helper(void)
     }
 }
 
+void lata_vec_dirty_reset(void)
+{
+    memset(lata_vec_dirty_size, 0, sizeof(lata_vec_dirty_size));
+}
+
+void lata_vec_mark_dirty(unsigned reg, unsigned size)
+{
+    if (reg < 32 && size < 4) {
+        lata_vec_dirty_size[reg] = size + 1;
+    }
+}
+
+void lata_vec_mark_clean(unsigned reg)
+{
+    if (reg < 32) {
+        lata_vec_dirty_size[reg] = 0;
+    }
+}
+
+static void lata_vec_clear_high(IR2_OPND vreg, unsigned size)
+{
+    IR2_OPND vtmp;
+
+    switch (size) {
+    case 0:
+        vtmp = ra_alloc_ftemp();
+        la_vori_b(vtmp, vreg, 0);
+        la_vxor_v(vreg, vreg, vreg);
+        la_vextrins_b(vreg, vtmp, 0);
+        free_alloc_fpr(vtmp);
+        break;
+    case 1:
+        vtmp = ra_alloc_ftemp();
+        la_vori_b(vtmp, vreg, 0);
+        la_vxor_v(vreg, vreg, vreg);
+        la_vextrins_h(vreg, vtmp, 0);
+        free_alloc_fpr(vtmp);
+        break;
+    case 2:
+        vtmp = ra_alloc_ftemp();
+        la_vori_b(vtmp, vreg, 0);
+        la_vxor_v(vreg, vreg, vreg);
+        la_vextrins_w(vreg, vtmp, 0);
+        free_alloc_fpr(vtmp);
+        break;
+    case 3:
+        la_vinsgr2vr_d(vreg, zero_ir2_opnd, 1);
+        break;
+    default:
+        break;
+    }
+}
+
+void lata_vec_materialize_dirty(unsigned reg)
+{
+    unsigned size;
+    IR2_OPND vreg;
+
+    if (reg >= 32 || !lata_vec_dirty_size[reg]) {
+        return;
+    }
+
+    size = lata_vec_dirty_size[reg] - 1;
+    vreg = alloc_fpr_src(reg);
+    lata_vec_clear_high(vreg, size);
+    store_fpr_dst(reg, vreg);
+    free_alloc_fpr(vreg);
+    lata_vec_dirty_size[reg] = 0;
+}
+
+void lata_vec_materialize_all_dirty(void)
+{
+    for (unsigned i = 0; i < 32; i++) {
+        lata_vec_materialize_dirty(i);
+    }
+}
+
 void lata_gen_call_helper_prologue(TCGContext *tcg_ctx)
 {
     lata_df_mark_helper_boundary();
     lata_flush_writes_before_helper();
+    lata_vec_materialize_all_dirty();
 
     for(int i = 0; i <= 31; ++i) {
         if(arm_la_map[i] > 0) {
@@ -729,6 +808,7 @@ void lata_gen_call_helper_prologue_no_flags(TCGContext *tcg_ctx)
 {
     lata_df_mark_helper_boundary();
     lata_flush_writes_before_helper();
+    lata_vec_materialize_all_dirty();
 
     for(int i = 0; i <= 31; ++i) {
         if(arm_la_map[i] > 0) {
@@ -1241,6 +1321,7 @@ void store_fpr_dst(int i, IR2_OPND opnd) {
 
         // ra_free_temp(offset);
     }
+    lata_vec_mark_clean(i);
 }
 
 void free_alloc_fpr(IR2_OPND opnd) {

@@ -23,6 +23,15 @@ enum {
     LATA_NZCV_ALL = LATA_NZCV_N | LATA_NZCV_Z | LATA_NZCV_C | LATA_NZCV_V,
 };
 
+enum {
+    LATA_VEC_GT_B = 0,
+    LATA_VEC_GT_H = 1,
+    LATA_VEC_GT_S = 2,
+    LATA_VEC_GT_D = 3,
+    LATA_VEC_HIGH_CLASSES = 4,
+    LATA_VEC_HIGH_ALL = (1u << LATA_VEC_HIGH_CLASSES) - 1,
+};
+
 typedef struct LataNZCVRule {
     uint32_t pattern;
     uint32_t mask;
@@ -125,6 +134,9 @@ static inline void fact_vec_use(LataIR1Facts *fact, unsigned reg)
 {
     if (reg < 32) {
         fact->vec_use |= 1u << reg;
+        for (unsigned i = 0; i < LATA_VEC_HIGH_CLASSES; i++) {
+            fact->vec_high_use[i] |= 1u << reg;
+        }
     }
 }
 
@@ -132,6 +144,63 @@ static inline void fact_vec_def(LataIR1Facts *fact, unsigned reg)
 {
     if (reg < 32) {
         fact->vec_def |= 1u << reg;
+        for (unsigned i = 0; i < LATA_VEC_HIGH_CLASSES; i++) {
+            fact->vec_high_def[i] |= 1u << reg;
+        }
+    }
+}
+
+static inline unsigned vec_high_use_mask_for_low_size(unsigned size)
+{
+    switch (size) {
+    case 0: /* B reads only byte 0. */
+        return 0;
+    case 1: /* H reads bytes [1:0]. */
+        return 1u << LATA_VEC_GT_B;
+    case 2: /* S reads bytes [3:0]. */
+        return (1u << LATA_VEC_GT_B) | (1u << LATA_VEC_GT_H);
+    case 3: /* D reads bytes [7:0]. */
+        return (1u << LATA_VEC_GT_B) | (1u << LATA_VEC_GT_H) |
+               (1u << LATA_VEC_GT_S);
+    default:
+        return LATA_VEC_HIGH_ALL;
+    }
+}
+
+static inline void fact_vec_low_use(LataIR1Facts *fact, unsigned reg,
+                                    unsigned size)
+{
+    uint32_t bit = reg < 32 ? (1u << reg) : 0;
+    unsigned mask = vec_high_use_mask_for_low_size(size);
+
+    if (!bit) {
+        return;
+    }
+    fact->vec_use |= bit;
+    for (unsigned i = 0; i < LATA_VEC_HIGH_CLASSES; i++) {
+        if (mask & (1u << i)) {
+            fact->vec_high_use[i] |= bit;
+        }
+    }
+}
+
+static inline void fact_vec_low_def(LataIR1Facts *fact, unsigned reg)
+{
+    fact_vec_def(fact, reg);
+}
+
+static inline unsigned fp_type_to_vec_size(unsigned type)
+{
+    return type == 3 ? 1 : type == 0 ? 2 : 3;
+}
+
+static inline void fact_vec_store_use(LataIR1Facts *fact, unsigned reg,
+                                      unsigned size)
+{
+    if (size >= 4) {
+        fact_vec_use(fact, reg);
+    } else {
+        fact_vec_low_use(fact, reg, size);
     }
 }
 
@@ -579,7 +648,7 @@ static bool fact_fp_int_conv(LataIR1Facts *fact, DisasContext *ir1)
             return true;
         }
         fact_use(fact, rn, sf);
-        fact_vec_def(fact, rd);
+        fact_vec_low_def(fact, rd);
         return true;
     case 0: /* FCVT[NPMZ]S */
     case 1: /* FCVT[NPMZ]U */
@@ -593,7 +662,7 @@ static bool fact_fp_int_conv(LataIR1Facts *fact, DisasContext *ir1)
             fact_exception_boundary(fact);
             return true;
         }
-        fact_vec_use(fact, rn);
+        fact_vec_low_use(fact, rn, fp_type_to_vec_size(type));
         fact_def(fact, rd, !sf);
         if (is_signed) {
             helper_possible = (opcode & 4) && type != 0;
@@ -614,11 +683,17 @@ static bool fact_fp_int_conv(LataIR1Facts *fact, DisasContext *ir1)
     switch ((sf << 7) | (type << 5) | (rmode << 3) | opcode) {
     case 0b01100110: /* FMOV half -> 32-bit int */
     case 0b11100110: /* FMOV half -> 64-bit int */
+        fact_vec_low_use(fact, rn, 1);
+        fact_def(fact, rd, true);
+        return true;
     case 0b00000110: /* FMOV 32-bit */
-        fact_vec_use(fact, rn);
+        fact_vec_low_use(fact, rn, 2);
         fact_def(fact, rd, true);
         return true;
     case 0b10100110: /* FMOV 64-bit */
+        fact_vec_low_use(fact, rn, 3);
+        fact_def(fact, rd, false);
+        return true;
     case 0b11001110: /* FMOV top half of 128-bit */
         fact_vec_use(fact, rn);
         fact_def(fact, rd, false);
@@ -626,15 +701,15 @@ static bool fact_fp_int_conv(LataIR1Facts *fact, DisasContext *ir1)
     case 0b01100111: /* FMOV 32-bit int -> half */
     case 0b00000111: /* FMOV 32-bit int -> float */
         fact_use(fact, rn, false);
-        fact_vec_def(fact, rd);
+        fact_vec_low_def(fact, rd);
         return true;
     case 0b11100111: /* FMOV 64-bit int -> half */
         fact_use(fact, rn, false);
-        fact_vec_def(fact, rd);
+        fact_vec_low_def(fact, rd);
         return true;
     case 0b10100111: /* FMOV 64-bit int -> double */
         fact_use(fact, rn, true);
-        fact_vec_def(fact, rd);
+        fact_vec_low_def(fact, rd);
         return true;
     case 0b11001111: /* FMOV 64-bit int -> top half of 128-bit */
         fact_use(fact, rn, true);
@@ -642,7 +717,7 @@ static bool fact_fp_int_conv(LataIR1Facts *fact, DisasContext *ir1)
         fact_vec_def(fact, rd);
         return true;
     case 0b00111110: /* FJCVTZS */
-        fact_vec_use(fact, rn);
+        fact_vec_low_use(fact, rn, 3);
         fact_def(fact, rd, true);
         fact->nzcv_def |= LATA_NZCV_ALL;
         fact_exception_boundary(fact);
@@ -680,11 +755,11 @@ static bool fact_fp_fixed_conv(LataIR1Facts *fact, DisasContext *ir1)
     case 0x2: /* SCVTF */
     case 0x3: /* UCVTF */
         fact_use(fact, rn, sf);
-        fact_vec_def(fact, rd);
+        fact_vec_low_def(fact, rd);
         return true;
     case 0x18: /* FCVTZS */
     case 0x19: /* FCVTZU */
-        fact_vec_use(fact, rn);
+        fact_vec_low_use(fact, rn, fp_type_to_vec_size(type));
         fact_def(fact, rd, !sf);
         if (type == 3 || opcode == 1 || scale != 64) {
             fact_helper_boundary(fact);
@@ -705,14 +780,17 @@ static void fact_scalar_fp(LataIR1Facts *fact, DisasContext *ir1)
     unsigned rm = extract32(insn, 16, 5);
 
     if (extract32(insn, 24, 1)) {
+        unsigned type = extract32(insn, 22, 2);
+        unsigned size = fp_type_to_vec_size(type);
+
         if (!scalar_fp_3src_supported(insn)) {
             fact_helper_boundary(fact);
             return;
         }
-        fact_vec_def(fact, rd);
-        fact_vec_use(fact, rn);
-        fact_vec_use(fact, rm);
-        fact_vec_use(fact, ra);
+        fact_vec_low_def(fact, rd);
+        fact_vec_low_use(fact, rn, size);
+        fact_vec_low_use(fact, rm, size);
+        fact_vec_low_use(fact, ra, size);
         return;
     }
 
@@ -728,34 +806,49 @@ static void fact_scalar_fp(LataIR1Facts *fact, DisasContext *ir1)
 
     switch (extract32(insn, 10, 2)) {
     case 1: /* Floating point conditional compare */
+    {
+        unsigned type = extract32(insn, 22, 2);
+        unsigned size = fp_type_to_vec_size(type);
+
         if (!scalar_fp_ccomp_supported(insn)) {
             fact_helper_boundary(fact);
             break;
         }
-        fact_vec_use(fact, rn);
-        fact_vec_use(fact, rm);
+        fact_vec_low_use(fact, rn, size);
+        fact_vec_low_use(fact, rm, size);
         fact->nzcv_use |= nzcv_mask_from_cond(extract32(insn, 12, 4));
         fact->nzcv_def |= LATA_NZCV_ALL;
         break;
+    }
     case 2: /* Floating point data-processing (2 source) */
+    {
+        unsigned type = extract32(insn, 22, 2);
+        unsigned size = fp_type_to_vec_size(type);
+
         if (!scalar_fp_2src_supported(insn)) {
             fact_helper_boundary(fact);
             break;
         }
-        fact_vec_def(fact, rd);
-        fact_vec_use(fact, rn);
-        fact_vec_use(fact, rm);
+        fact_vec_low_def(fact, rd);
+        fact_vec_low_use(fact, rn, size);
+        fact_vec_low_use(fact, rm, size);
         break;
+    }
     case 3: /* Floating point conditional select */
+    {
+        unsigned type = extract32(insn, 22, 2);
+        unsigned size = fp_type_to_vec_size(type);
+
         if (!scalar_fp_csel_supported(insn)) {
             fact_helper_boundary(fact);
             break;
         }
-        fact_vec_def(fact, rd);
-        fact_vec_use(fact, rn);
-        fact_vec_use(fact, rm);
+        fact_vec_low_def(fact, rd);
+        fact_vec_low_use(fact, rn, size);
+        fact_vec_low_use(fact, rm, size);
         fact->nzcv_use |= nzcv_mask_from_cond(extract32(insn, 12, 4));
         break;
+    }
     case 0:
         switch (ctz32(extract32(insn, 12, 4))) {
         case 0: /* Floating point immediate */
@@ -763,30 +856,37 @@ static void fact_scalar_fp(LataIR1Facts *fact, DisasContext *ir1)
                 fact_helper_boundary(fact);
                 break;
             }
-            fact_vec_def(fact, rd);
+            fact_vec_low_def(fact, rd);
             break;
         case 1: { /* Floating point compare */
             bool cmp_with_zero = extract32(insn, 3, 2) & 1;
+            unsigned type = extract32(insn, 22, 2);
+            unsigned size = fp_type_to_vec_size(type);
 
             if (!scalar_fp_compare_supported(insn)) {
                 fact_helper_boundary(fact);
                 break;
             }
-            fact_vec_use(fact, rn);
+            fact_vec_low_use(fact, rn, size);
             if (!cmp_with_zero) {
-                fact_vec_use(fact, rm);
+                fact_vec_low_use(fact, rm, size);
             }
             fact->nzcv_def |= LATA_NZCV_ALL;
             break;
         }
         case 2: /* Floating point data-processing (1 source) */
+        {
+            unsigned type = extract32(insn, 22, 2);
+            unsigned src_size = fp_type_to_vec_size(type);
+
             if (!scalar_fp_1src_supported(ir1, insn)) {
                 fact_helper_boundary(fact);
                 break;
             }
-            fact_vec_def(fact, rd);
-            fact_vec_use(fact, rn);
+            fact_vec_low_def(fact, rd);
+            fact_vec_low_use(fact, rn, src_size);
             break;
+        }
         case 3:
             fact_helper_boundary(fact);
             break;
@@ -1279,16 +1379,16 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
         break;
     case AARCH64_A64_LDR_v:
         fact_mem_reg_addr(fact, &ir1->arg.f_ldst);
-        fact_vec_def(fact, ir1->arg.f_ldst.rt);
+        fact_vec_low_def(fact, ir1->arg.f_ldst.rt);
         break;
     case AARCH64_A64_LDR_v_i:
         fact_mem_imm_addr(fact, &ir1->arg.f_ldst_imm);
-        fact_vec_def(fact, ir1->arg.f_ldst_imm.rt);
+        fact_vec_low_def(fact, ir1->arg.f_ldst_imm.rt);
         break;
     case AARCH64_A64_LDP_v:
         fact_mem_pair_addr(fact, &ir1->arg.f_ldstpair);
-        fact_vec_def(fact, ir1->arg.f_ldstpair.rt);
-        fact_vec_def(fact, ir1->arg.f_ldstpair.rt2);
+        fact_vec_low_def(fact, ir1->arg.f_ldstpair.rt);
+        fact_vec_low_def(fact, ir1->arg.f_ldstpair.rt2);
         break;
     case AARCH64_A64_LD_lit_v:
         fact_helper_boundary(fact);
@@ -1315,16 +1415,19 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
         break;
     case AARCH64_A64_STR_v:
         fact_mem_reg_addr(fact, &ir1->arg.f_ldst);
-        fact_vec_use(fact, ir1->arg.f_ldst.rt);
+        fact_vec_store_use(fact, ir1->arg.f_ldst.rt, ir1->arg.f_ldst.sz);
         break;
     case AARCH64_A64_STR_v_i:
         fact_mem_imm_addr(fact, &ir1->arg.f_ldst_imm);
-        fact_vec_use(fact, ir1->arg.f_ldst_imm.rt);
+        fact_vec_store_use(fact, ir1->arg.f_ldst_imm.rt,
+                           ir1->arg.f_ldst_imm.sz);
         break;
     case AARCH64_A64_STP_v:
         fact_mem_pair_addr(fact, &ir1->arg.f_ldstpair);
-        fact_vec_use(fact, ir1->arg.f_ldstpair.rt);
-        fact_vec_use(fact, ir1->arg.f_ldstpair.rt2);
+        fact_vec_store_use(fact, ir1->arg.f_ldstpair.rt,
+                           ir1->arg.f_ldstpair.sz);
+        fact_vec_store_use(fact, ir1->arg.f_ldstpair.rt2,
+                           ir1->arg.f_ldstpair.sz);
         break;
     case AARCH64_A64_ST_mult:
         fact_mem_mult_addr(fact, &ir1->arg.f_ldst_mult);
@@ -1521,6 +1624,7 @@ static void lata_df_store_summary(TranslationBlock *tb, LataIR1DF *df)
     uint32_t live = 0;
     uint32_t x_live = 0;
     uint32_t vec_live = 0;
+    uint32_t vec_high_live[LATA_VEC_HIGH_CLASSES] = { 0 };
     uint8_t nzcv_live = 0;
     bool helper_boundary = false;
     bool state_boundary = false;
@@ -1532,6 +1636,8 @@ static void lata_df_store_summary(TranslationBlock *tb, LataIR1DF *df)
     uint32_t gpr_all_x_use = 0;
     uint32_t vec_up_use = 0;
     uint32_t vec_def = 0;
+    uint32_t vec_high_up_use[LATA_VEC_HIGH_CLASSES] = { 0 };
+    uint32_t vec_high_def[LATA_VEC_HIGH_CLASSES] = { 0 };
     uint8_t nzcv_up_use = 0;
     uint8_t nzcv_def = 0;
 
@@ -1541,22 +1647,38 @@ static void lata_df_store_summary(TranslationBlock *tb, LataIR1DF *df)
         df[i].gpr_live_after = live;
         df[i].gpr_x_live_after = x_live;
         df[i].vec_live_after = vec_live;
+        for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+            df[i].vec_high_live_after[j] = vec_high_live[j];
+            df[i].vec_high_local_live_after[j] = vec_high_live[j];
+        }
         df[i].nzcv_live_after = nzcv_live;
         live = fact->gpr_use | (live & ~fact->gpr_def);
         x_live = fact->gpr_x_use | (x_live & ~fact->gpr_def);
         vec_live = fact->vec_use | (vec_live & ~fact->vec_def);
+        for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+            vec_high_live[j] = fact->vec_high_use[j] |
+                               (vec_high_live[j] & ~fact->vec_high_def[j]);
+        }
         nzcv_live = fact->nzcv_use | (nzcv_live & ~fact->nzcv_def);
         helper_boundary |= fact->helper_boundary;
         state_boundary |= fact->state_boundary;
         gpr_up_use = fact->gpr_use | (gpr_up_use & ~fact->gpr_def);
         gpr_up_x_use = fact->gpr_x_use | (gpr_up_x_use & ~fact->gpr_def);
         vec_up_use = fact->vec_use | (vec_up_use & ~fact->vec_def);
+        for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+            vec_high_up_use[j] = fact->vec_high_use[j] |
+                                 (vec_high_up_use[j] &
+                                  ~fact->vec_high_def[j]);
+        }
         nzcv_up_use = fact->nzcv_use | (nzcv_up_use & ~fact->nzcv_def);
         gpr_def |= fact->gpr_def;
         gpr_wdef |= fact->gpr_wdef;
         gpr_all_use |= fact->gpr_use;
         gpr_all_x_use |= fact->gpr_x_use;
         vec_def |= fact->vec_def;
+        for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+            vec_high_def[j] |= fact->vec_high_def[j];
+        }
         nzcv_def |= fact->nzcv_def;
     }
 
@@ -1574,6 +1696,12 @@ static void lata_df_store_summary(TranslationBlock *tb, LataIR1DF *df)
     tb->lata_df_vec_def = vec_def;
     tb->lata_df_vec_live_in = vec_live;
     tb->lata_df_vec_live_out = UINT32_MAX;
+    for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+        tb->lata_df_vec_high_use[j] = vec_high_up_use[j];
+        tb->lata_df_vec_high_def[j] = vec_high_def[j];
+        tb->lata_df_vec_high_live_in[j] = vec_high_live[j];
+        tb->lata_df_vec_high_live_out[j] = UINT32_MAX;
+    }
     tb->lata_df_nzcv_use_mask = nzcv_up_use;
     tb->lata_df_nzcv_def_mask = nzcv_def;
     tb->lata_df_nzcv_live_in_mask = nzcv_live;
@@ -1596,6 +1724,7 @@ static void lata_df_refresh_ir1_live_after(TranslationBlock *tb)
     uint32_t live;
     uint32_t x_live;
     uint32_t vec_live;
+    uint32_t vec_high_live[LATA_VEC_HIGH_CLASSES];
     uint8_t nzcv_live;
 
     if (!tb || !df || !tb->icount) {
@@ -1605,6 +1734,9 @@ static void lata_df_refresh_ir1_live_after(TranslationBlock *tb)
     live = tb->lata_df_gpr_live_out;
     x_live = tb->lata_df_gpr_x_live_out;
     vec_live = tb->lata_df_vec_live_out;
+    for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+        vec_high_live[j] = tb->lata_df_vec_high_live_out[j];
+    }
     nzcv_live = tb->lata_df_nzcv_live_out_mask;
 
     for (int i = tb->icount - 1; i >= 0; i--) {
@@ -1613,10 +1745,17 @@ static void lata_df_refresh_ir1_live_after(TranslationBlock *tb)
         df[i].gpr_live_after = live;
         df[i].gpr_x_live_after = x_live;
         df[i].vec_live_after = vec_live;
+        for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+            df[i].vec_high_live_after[j] = vec_high_live[j];
+        }
         df[i].nzcv_live_after = nzcv_live;
         live = fact->gpr_use | (live & ~fact->gpr_def);
         x_live = fact->gpr_x_use | (x_live & ~fact->gpr_def);
         vec_live = fact->vec_use | (vec_live & ~fact->vec_def);
+        for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+            vec_high_live[j] = fact->vec_high_use[j] |
+                               (vec_high_live[j] & ~fact->vec_high_def[j]);
+        }
         nzcv_live = fact->nzcv_use | (nzcv_live & ~fact->nzcv_def);
     }
 }
@@ -1670,12 +1809,19 @@ void lata_df_analyze_tu(TranslationBlock **tb_list, uint32_t tb_count)
             uint32_t old_live_out = tb->lata_df_gpr_live_out;
             uint32_t old_x_live_out = tb->lata_df_gpr_x_live_out;
             uint32_t old_vec_live_out = tb->lata_df_vec_live_out;
+            uint32_t old_vec_high_live_out[LATA_VEC_HIGH_CLASSES];
             uint8_t old_nzcv_live_out = tb->lata_df_nzcv_live_out_mask;
             bool has_external_exit = false;
 
+            for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+                old_vec_high_live_out[j] = tb->lata_df_vec_high_live_out[j];
+            }
             tb->lata_df_gpr_live_out = 0;
             tb->lata_df_gpr_x_live_out = 0;
             tb->lata_df_vec_live_out = 0;
+            for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+                tb->lata_df_vec_high_live_out[j] = 0;
+            }
             tb->lata_df_nzcv_live_out_mask = 0;
             lata_df_get_successors(tb, succ, &succ_count);
 
@@ -1683,6 +1829,10 @@ void lata_df_analyze_tu(TranslationBlock **tb_list, uint32_t tb_count)
                 tb->lata_df_gpr_live_out |= succ[j]->lata_df_gpr_live_in;
                 tb->lata_df_gpr_x_live_out |= succ[j]->lata_df_gpr_x_live_in;
                 tb->lata_df_vec_live_out |= succ[j]->lata_df_vec_live_in;
+                for (unsigned k = 0; k < LATA_VEC_HIGH_CLASSES; k++) {
+                    tb->lata_df_vec_high_live_out[k] |=
+                        succ[j]->lata_df_vec_high_live_in[k];
+                }
                 tb->lata_df_nzcv_live_out_mask |=
                     succ[j]->lata_df_nzcv_live_in_mask;
             }
@@ -1708,6 +1858,9 @@ void lata_df_analyze_tu(TranslationBlock **tb_list, uint32_t tb_count)
                 tb->lata_df_gpr_live_out = UINT32_MAX;
                 tb->lata_df_gpr_x_live_out = UINT32_MAX;
                 tb->lata_df_vec_live_out = UINT32_MAX;
+                for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+                    tb->lata_df_vec_high_live_out[j] = UINT32_MAX;
+                }
                 tb->lata_df_nzcv_live_out_mask = LATA_NZCV_ALL;
             }
 
@@ -1720,6 +1873,12 @@ void lata_df_analyze_tu(TranslationBlock **tb_list, uint32_t tb_count)
             tb->lata_df_vec_live_in =
                 tb->lata_df_vec_use |
                 (tb->lata_df_vec_live_out & ~tb->lata_df_vec_def);
+            for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+                tb->lata_df_vec_high_live_in[j] =
+                    tb->lata_df_vec_high_use[j] |
+                    (tb->lata_df_vec_high_live_out[j] &
+                     ~tb->lata_df_vec_high_def[j]);
+            }
             tb->lata_df_nzcv_live_in_mask =
                 tb->lata_df_nzcv_use_mask |
                 (tb->lata_df_nzcv_live_out_mask &
@@ -1734,6 +1893,10 @@ void lata_df_analyze_tu(TranslationBlock **tb_list, uint32_t tb_count)
                        old_x_live_out != tb->lata_df_gpr_x_live_out ||
                        old_vec_live_out != tb->lata_df_vec_live_out ||
                        old_nzcv_live_out != tb->lata_df_nzcv_live_out_mask;
+            for (unsigned j = 0; j < LATA_VEC_HIGH_CLASSES; j++) {
+                changed |= old_vec_high_live_out[j] !=
+                           tb->lata_df_vec_high_live_out[j];
+            }
         }
     } while (changed);
 
@@ -1803,6 +1966,58 @@ bool lata_df_reg_high_live_after_write(unsigned reg)
     return (df[index].gpr_x_live_after & (1u << reg)) != 0;
 }
 
+bool lata_df_vec_high_live_after_write(unsigned reg, unsigned size)
+{
+    TranslationBlock *tb = active_df.tb;
+    uint32_t index = active_df.next_index;
+    LataIR1DF *df;
+    unsigned class;
+
+    if (!option_lata_dataflow_opt || !tb || reg >= 32 || size >= 4) {
+        return true;
+    }
+    if (tb->lata_df_helper_boundary || tb->lata_df_state_boundary) {
+        return true;
+    }
+    if (index >= tb->icount || index >= TCG_MAX_INSNS) {
+        return true;
+    }
+    df = tb->lata_df_ir1;
+    if (!df) {
+        return true;
+    }
+    class = size == 0 ? LATA_VEC_GT_B :
+            size == 1 ? LATA_VEC_GT_H :
+            size == 2 ? LATA_VEC_GT_S : LATA_VEC_GT_D;
+    return (df[index].vec_high_live_after[class] & (1u << reg)) != 0;
+}
+
+bool lata_df_vec_high_local_live_after_write(unsigned reg, unsigned size)
+{
+    TranslationBlock *tb = active_df.tb;
+    uint32_t index = active_df.next_index;
+    LataIR1DF *df;
+    unsigned class;
+
+    if (!option_lata_dataflow_opt || !tb || reg >= 32 || size >= 4) {
+        return true;
+    }
+    if (tb->lata_df_helper_boundary || tb->lata_df_state_boundary) {
+        return true;
+    }
+    if (index >= tb->icount || index >= TCG_MAX_INSNS) {
+        return true;
+    }
+    df = tb->lata_df_ir1;
+    if (!df) {
+        return true;
+    }
+    class = size == 0 ? LATA_VEC_GT_B :
+            size == 1 ? LATA_VEC_GT_H :
+            size == 2 ? LATA_VEC_GT_S : LATA_VEC_GT_D;
+    return (df[index].vec_high_local_live_after[class] & (1u << reg)) != 0;
+}
+
 bool lata_df_should_save_nzcv_for_edge(TranslationBlock *tb, unsigned edge)
 {
     if (!option_lata_dataflow_opt || !tb || edge > 1) {
@@ -1825,13 +2040,27 @@ static void lata_df_dump_fact(uint32_t index, DisasContext *ir1,
              " insn=0x%08x type=%d"
              " use=0x%08x def=0x%08x wdef=0x%08x xuse=0x%08x"
              " vec_use=0x%08x vec_def=0x%08x"
+             " vec_high_use={%08x,%08x,%08x,%08x}"
+             " vec_high_def={%08x,%08x,%08x,%08x}"
              " live_after=0x%08x x_live_after=0x%08x"
              " vec_live_after=0x%08x"
+             " vec_high_after={%08x,%08x,%08x,%08x}"
+             " vec_high_local_after={%08x,%08x,%08x,%08x}"
              " nzcv(use=0x%x def=0x%x after=0x%x) helper=%d state=%d\n",
              index, (uint64_t)ir1->pc_curr, ir1->insn, ir1->insn_type,
              fact->gpr_use, fact->gpr_def, fact->gpr_wdef,
              fact->gpr_x_use, fact->vec_use, fact->vec_def,
+             fact->vec_high_use[0], fact->vec_high_use[1],
+             fact->vec_high_use[2], fact->vec_high_use[3],
+             fact->vec_high_def[0], fact->vec_high_def[1],
+             fact->vec_high_def[2], fact->vec_high_def[3],
              df->gpr_live_after, df->gpr_x_live_after, df->vec_live_after,
+             df->vec_high_live_after[0], df->vec_high_live_after[1],
+             df->vec_high_live_after[2], df->vec_high_live_after[3],
+             df->vec_high_local_live_after[0],
+             df->vec_high_local_live_after[1],
+             df->vec_high_local_live_after[2],
+             df->vec_high_local_live_after[3],
              fact->nzcv_use, fact->nzcv_def, df->nzcv_live_after,
              fact->helper_boundary, fact->state_boundary);
 }
@@ -1848,6 +2077,10 @@ void lata_df_dump_tb(TranslationBlock *tb)
              " live_in=0x%08x live_out=0x%08x"
              " x_live_in=0x%08x x_live_out=0x%08x"
              " vec(use=0x%08x def=0x%08x in=0x%08x out=0x%08x)"
+             " vec_high(use={%08x,%08x,%08x,%08x}"
+             " def={%08x,%08x,%08x,%08x}"
+             " in={%08x,%08x,%08x,%08x}"
+             " out={%08x,%08x,%08x,%08x})"
              " nzcv(use=0x%x def=0x%x in=0x%x out=0x%x)"
              " helper=%d state=%d\n",
              (uint64_t)tb->pc, tb->lata_df_gpr_use, tb->lata_df_gpr_def,
@@ -1857,7 +2090,20 @@ void lata_df_dump_tb(TranslationBlock *tb)
              tb->lata_df_gpr_live_out, tb->lata_df_gpr_x_live_in,
              tb->lata_df_gpr_x_live_out, tb->lata_df_vec_use,
              tb->lata_df_vec_def, tb->lata_df_vec_live_in,
-             tb->lata_df_vec_live_out, tb->lata_df_nzcv_use_mask,
+             tb->lata_df_vec_live_out,
+             tb->lata_df_vec_high_use[0], tb->lata_df_vec_high_use[1],
+             tb->lata_df_vec_high_use[2], tb->lata_df_vec_high_use[3],
+             tb->lata_df_vec_high_def[0], tb->lata_df_vec_high_def[1],
+             tb->lata_df_vec_high_def[2], tb->lata_df_vec_high_def[3],
+             tb->lata_df_vec_high_live_in[0],
+             tb->lata_df_vec_high_live_in[1],
+             tb->lata_df_vec_high_live_in[2],
+             tb->lata_df_vec_high_live_in[3],
+             tb->lata_df_vec_high_live_out[0],
+             tb->lata_df_vec_high_live_out[1],
+             tb->lata_df_vec_high_live_out[2],
+             tb->lata_df_vec_high_live_out[3],
+             tb->lata_df_nzcv_use_mask,
              tb->lata_df_nzcv_def_mask, tb->lata_df_nzcv_live_in_mask,
              tb->lata_df_nzcv_live_out_mask, tb->lata_df_helper_boundary,
              tb->lata_df_state_boundary);

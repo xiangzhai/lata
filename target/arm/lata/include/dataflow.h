@@ -15,6 +15,8 @@ typedef struct LataIR1Facts {
     uint32_t gpr_wdef;
     uint32_t vec_use;
     uint32_t vec_def;
+    uint32_t vec_high_use[4];
+    uint32_t vec_high_def[4];
     uint8_t nzcv_use;
     uint8_t nzcv_def;
     bool helper_boundary;
@@ -26,6 +28,8 @@ typedef struct LataIR1DF {
     uint32_t gpr_live_after;
     uint32_t gpr_x_live_after;
     uint32_t vec_live_after;
+    uint32_t vec_high_live_after[4];
+    uint32_t vec_high_local_live_after[4];
     uint8_t nzcv_live_after;
 } LataIR1DF;
 
@@ -40,6 +44,8 @@ void lata_df_end_translate(void);
 void lata_df_advance_insn(void);
 void lata_df_mark_helper_boundary(void);
 bool lata_df_reg_high_live_after_write(unsigned reg);
+bool lata_df_vec_high_live_after_write(unsigned reg, unsigned size);
+bool lata_df_vec_high_local_live_after_write(unsigned reg, unsigned size);
 bool lata_df_should_save_nzcv_for_edge(TranslationBlock *tb, unsigned edge);
 
 #ifdef CONFIG_LATA_DEBUG
