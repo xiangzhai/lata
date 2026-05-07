@@ -37,6 +37,8 @@ typedef struct LataGPRRule {
     LataGPRFactFn fn;
 } LataGPRRule;
 
+static uint8_t nzcv_mask_from_cond(unsigned cond);
+
 static const LataNZCVRule nzcv_rules[] = {
     { 0x31000000, 0x3f800000, 0, LATA_NZCV_ALL }, /* ADDS/SUBS immediate */
     { 0x2b000000, 0x3f200000, 0, LATA_NZCV_ALL }, /* ADDS/SUBS shifted */
@@ -47,7 +49,7 @@ static const LataNZCVRule nzcv_rules[] = {
     { 0x6a000000, 0x7f000000, 0, LATA_NZCV_ALL }, /* ANDS/BICS shifted */
     { 0x1e202000, 0x5f203c00, 0, LATA_NZCV_ALL }, /* FCMP/FCMPE */
     { 0x1e200400, 0x5f200c00, LATA_NZCV_ALL, LATA_NZCV_ALL }, /* FCCMP */
-    { 0xba000400, 0xffe07c10, LATA_NZCV_ALL, 0 }, /* RMIF def is mask-based */
+    { 0xba000400, 0xffe07c10, 0, 0 }, /* RMIF def is mask-based */
     { 0x3a400800, 0x3e400400, LATA_NZCV_ALL, LATA_NZCV_ALL }, /* CCMP/CCMN */
     { 0xd500401f, 0xfffffc1f, LATA_NZCV_C, LATA_NZCV_C }, /* CFINV */
     { 0xd500403f, 0xfffffc1f, LATA_NZCV_ALL, LATA_NZCV_ALL }, /* XAFLAG */
@@ -78,6 +80,47 @@ static inline void fact_def(LataIR1Facts *fact, unsigned reg, bool is_w)
     }
 }
 
+static inline void fact_state_boundary(LataIR1Facts *fact)
+{
+    fact->state_boundary = true;
+}
+
+static inline void fact_helper_boundary(LataIR1Facts *fact)
+{
+    fact->helper_boundary = true;
+    fact->state_boundary = true;
+}
+
+static inline void fact_exception_boundary(LataIR1Facts *fact)
+{
+    fact->helper_boundary = true;
+}
+
+static inline bool df_ldst_iss_sf(int size, bool sign, bool ext)
+{
+    return sign ? !ext : size == 3;
+}
+
+static inline bool df_load_high_zero(int size, bool sign, bool ext)
+{
+    return !df_ldst_iss_sf(size, sign, ext);
+}
+
+static inline bool df_pair_load_high_zero(arg_ldstpair *a)
+{
+    return a->sz != 3 && !a->sign;
+}
+
+static inline bool df_ldst_imm_wback_alias(arg_ldst_imm *a)
+{
+    return a->w && a->rt == a->rn && a->rn != 31;
+}
+
+static inline bool df_ldstpair_wback_alias(arg_ldstpair *a)
+{
+    return a->w && (a->rt == a->rn || a->rt2 == a->rn) && a->rn != 31;
+}
+
 static inline void fact_vec_use(LataIR1Facts *fact, unsigned reg)
 {
     if (reg < 32) {
@@ -102,7 +145,10 @@ static inline void fact_use_sp_addr(LataIR1Facts *fact, unsigned reg)
 static inline void fact_mem_reg_addr(LataIR1Facts *fact, arg_ldst *a)
 {
     fact_use_sp_addr(fact, a->rn);
-    fact_use(fact, a->rm, true);
+    fact_use(fact, a->rm, extract32(a->opt, 0, 2) == 3);
+    if (!extract32(a->opt, 1, 1)) {
+        fact_helper_boundary(fact);
+    }
 }
 
 static inline void fact_mem_imm_addr(LataIR1Facts *fact, arg_ldst_imm *a)
@@ -116,6 +162,11 @@ static inline void fact_mem_imm_addr(LataIR1Facts *fact, arg_ldst_imm *a)
 static inline void fact_mem_stlr_addr(LataIR1Facts *fact, arg_stlr *a)
 {
     fact_use_sp_addr(fact, a->rn);
+}
+
+static inline bool df_stlr_unallocated(arg_stlr *a)
+{
+    return !a->lasr;
 }
 
 static inline void fact_mem_stxr_addr(LataIR1Facts *fact, arg_stxr *a)
@@ -229,22 +280,50 @@ static void fact_extract(LataIR1Facts *fact, DisasContext *ir1)
 static void fact_movw(LataIR1Facts *fact, DisasContext *ir1)
 {
     arg_movw *a = &ir1->arg.f_movw;
+    bool high_zero = !a->sf;
 
     if (ir1->insn_type == AARCH64_A64_MOVK) {
         fact_use(fact, a->rd, a->sf);
     }
-    fact_def(fact, a->rd, !a->sf);
+    if (ir1->insn_type == AARCH64_A64_MOVZ && a->sf && a->hw < 2) {
+        high_zero = true;
+    }
+    fact_def(fact, a->rd, high_zero);
+}
+
+static bool sys_args_are_nzcv(const arg_SYS *a)
+{
+    return a->op0 == 3 && a->op1 == 3 && a->crn == 4 &&
+           a->crm == 2 && a->op2 == 0;
 }
 
 static void fact_sys(LataIR1Facts *fact, DisasContext *ir1)
 {
     arg_SYS *a = &ir1->arg.f_decode_insn3218;
+    bool is_nzcv = sys_args_are_nzcv(a);
 
     if (a->l) {
-        fact_def(fact, a->rt, true);
+        fact_def(fact, a->rt, is_nzcv);
     } else {
-        fact_use(fact, a->rt, true);
+        fact_use(fact, a->rt, !is_nzcv);
     }
+    if (!is_nzcv) {
+        fact_helper_boundary(fact);
+    }
+}
+
+static void fact_rmif(LataIR1Facts *fact, DisasContext *ir1)
+{
+    fact_use(fact, extract32(ir1->insn, 5, 5), true);
+}
+
+static void fact_fcadd(LataIR1Facts *fact, DisasContext *ir1)
+{
+    uint32_t insn = ir1->insn;
+
+    fact_vec_def(fact, extract32(insn, 0, 5));
+    fact_vec_use(fact, extract32(insn, 5, 5));
+    fact_vec_use(fact, extract32(insn, 16, 5));
 }
 
 static void fact_dataproc_reg(LataIR1Facts *fact, DisasContext *ir1)
@@ -259,20 +338,49 @@ static void fact_dataproc_reg(LataIR1Facts *fact, DisasContext *ir1)
     unsigned op3 = extract32(insn, 10, 6);
 
     if (!op1) {
+        bool invalid;
+
+        if (op2 & 8) {
+            if (op2 & 1) {
+                invalid = extract32(insn, 10, 3) > 4 ||
+                          extract32(insn, 22, 2) != 0;
+            } else {
+                invalid = extract32(insn, 22, 2) == 3 ||
+                          (!sf && extract32(insn, 10, 6) > 31);
+            }
+        } else {
+            invalid = !sf && extract32(insn, 15, 1);
+        }
+        if (invalid) {
+            fact_helper_boundary(fact);
+            return;
+        }
         fact_use(fact, rn, sf);
         fact_use(fact, rm, sf);
         fact_def(fact, rd, !sf);
         return;
     }
 
-    if (op2 == 0 && op3 == 0) {
-        fact_use(fact, rn, sf);
-        fact_use(fact, rm, sf);
-        fact_def(fact, rd, !sf);
+    if (op2 == 0) {
+        if (op3 == 0) {
+            fact_use(fact, rn, sf);
+            fact_use(fact, rm, sf);
+            fact_def(fact, rd, !sf);
+        } else if (op3 == 2 || op3 == 0x12 ||
+                   op3 == 0x22 || op3 == 0x32) {
+            fact_use(fact, rn, false);
+        } else {
+            fact_helper_boundary(fact);
+        }
         return;
     }
 
     if (op2 == 2) {
+        if (!extract32(insn, 29, 1) ||
+            extract32(insn, 10, 1) || extract32(insn, 4, 1)) {
+            fact_helper_boundary(fact);
+            return;
+        }
         fact_use(fact, rn, sf);
         if (!extract32(insn, 11, 1)) {
             fact_use(fact, rm, sf);
@@ -281,6 +389,10 @@ static void fact_dataproc_reg(LataIR1Facts *fact, DisasContext *ir1)
     }
 
     if (op2 == 4) {
+        if (extract32(insn, 29, 1) || extract32(insn, 11, 1)) {
+            fact_helper_boundary(fact);
+            return;
+        }
         fact_use(fact, rn, sf);
         fact_use(fact, rm, sf);
         fact_def(fact, rd, !sf);
@@ -289,39 +401,550 @@ static void fact_dataproc_reg(LataIR1Facts *fact, DisasContext *ir1)
 
     if (op2 == 6) {
         if (extract32(insn, 30, 1)) {
+            unsigned opcode = extract32(insn, 10, 6);
+
+            if (extract32(insn, 29, 1) || extract32(insn, 16, 5) != 0 ||
+                opcode > 5 || (opcode == 3 && !sf)) {
+                fact_helper_boundary(fact);
+                return;
+            }
             fact_use(fact, rn, sf);
             fact_def(fact, rd, !sf);
         } else {
+            unsigned opcode = extract32(insn, 10, 6);
+
+            if (!(opcode == 2 || opcode == 3 ||
+                  (opcode >= 8 && opcode <= 11) ||
+                  (opcode >= 16 && opcode <= 23))) {
+                fact_helper_boundary(fact);
+                return;
+            }
             fact_use(fact, rn, sf);
-            fact_use(fact, rm, sf);
-            fact_def(fact, rd, !sf);
+            if (opcode >= 16 && opcode <= 23) {
+                bool crc_x = extract32(insn, 31, 1);
+                unsigned size = opcode & 3;
+
+                fact_use(fact, rm, crc_x && size == 3);
+                fact_def(fact, rd, true);
+            } else {
+                fact_use(fact, rm, sf);
+                fact_def(fact, rd, !sf);
+            }
         }
         return;
     }
 
     if (op2 >= 8) {
         unsigned ra = extract32(insn, 10, 5);
+        unsigned op_id = (extract32(insn, 29, 3) << 4) |
+                         (extract32(insn, 21, 3) << 1) |
+                         extract32(insn, 15, 1);
+        bool long_word_mul = op_id == 0x42 || op_id == 0x43 ||
+                             op_id == 0x4a || op_id == 0x4b;
+        bool high_mul = op_id == 0x44 || op_id == 0x4c;
+        bool madd = op_id == 0x0 || op_id == 0x1 ||
+                    op_id == 0x40 || op_id == 0x41;
 
-        fact_use(fact, rn, sf);
-        fact_use(fact, rm, sf);
-        if (ra != 31) {
-            fact_use(fact, ra, sf);
+        if (!madd && !long_word_mul && !high_mul) {
+            fact_helper_boundary(fact);
+            return;
         }
-        fact_def(fact, rd, !sf);
+
+        if (high_mul) {
+            fact_use(fact, rn, true);
+            fact_use(fact, rm, true);
+        } else if (long_word_mul) {
+            fact_use(fact, rn, false);
+            fact_use(fact, rm, false);
+            if (ra != 31) {
+                fact_use(fact, ra, true);
+            }
+        } else {
+            fact_use(fact, rn, sf);
+            fact_use(fact, rm, sf);
+            if (ra != 31) {
+                fact_use(fact, ra, sf);
+            }
+        }
+        fact_def(fact, rd, !sf && !long_word_mul && !high_mul);
     }
 }
 
-static bool simd_fp_uses_helper(uint32_t insn)
+static bool simd_fp_is_scalar_fp(uint32_t insn)
 {
-    /* FJCVTZS is mostly inline, but still falls back to helper for NaN/Inf
-     * and huge finite inputs.  TBL/TBX and the legacy helper-backed vector
-     * conversion/saturating paths also need a full state boundary. */
-    if ((insn & 0xfffffc00) == 0x1e7e0000) {
+    return extract32(insn, 28, 1) && !extract32(insn, 30, 1);
+}
+
+static bool scalar_fp_type_is_32_64(unsigned type)
+{
+    return type == 0 || type == 1;
+}
+
+static bool scalar_fp_type_is_16_32_64(DisasContext *ir1, unsigned type)
+{
+    return scalar_fp_type_is_32_64(type) ||
+           (type == 3 && dc_isar_feature(aa64_fp16, ir1));
+}
+
+static bool scalar_fp_3src_supported(uint32_t insn)
+{
+    return !extract32(insn, 29, 3) &&
+           scalar_fp_type_is_32_64(extract32(insn, 22, 2));
+}
+
+static bool scalar_fp_compare_supported(uint32_t insn)
+{
+    return !extract32(insn, 29, 3) &&
+           !extract32(insn, 14, 2) &&
+           !extract32(insn, 0, 3) &&
+           scalar_fp_type_is_32_64(extract32(insn, 22, 2));
+}
+
+static bool scalar_fp_ccomp_supported(uint32_t insn)
+{
+    return !extract32(insn, 29, 3) &&
+           scalar_fp_type_is_32_64(extract32(insn, 22, 2));
+}
+
+static bool scalar_fp_csel_supported(uint32_t insn)
+{
+    return !extract32(insn, 29, 3) &&
+           scalar_fp_type_is_32_64(extract32(insn, 22, 2));
+}
+
+static bool scalar_fp_2src_supported(uint32_t insn)
+{
+    return !extract32(insn, 29, 3) &&
+           scalar_fp_type_is_32_64(extract32(insn, 22, 2)) &&
+           extract32(insn, 12, 4) <= 8;
+}
+
+static bool scalar_fp_imm_supported(DisasContext *ir1, uint32_t insn)
+{
+    return !extract32(insn, 29, 3) &&
+           !extract32(insn, 5, 5) &&
+           scalar_fp_type_is_16_32_64(ir1, extract32(insn, 22, 2));
+}
+
+static bool scalar_fp_1src_supported(DisasContext *ir1, uint32_t insn)
+{
+    unsigned type = extract32(insn, 22, 2);
+    unsigned opcode = extract32(insn, 15, 6);
+
+    if (extract32(insn, 29, 3)) {
+        return false;
+    }
+
+    switch (opcode) {
+    case 0x4:
+    case 0x5:
+    case 0x7:
+    {
+        unsigned dtype = opcode & 3;
+
+        return type != 2 && dtype != type &&
+               ((type != 3 && dtype != 3) ||
+                dc_isar_feature(aa64_fp16, ir1));
+    }
+    case 0x0 ... 0x3:
+    case 0x8 ... 0xc:
+    case 0xe ... 0xf:
+        return scalar_fp_type_is_16_32_64(ir1, type);
+    default:
+        return false;
+    }
+}
+
+static bool fact_fp_int_conv(LataIR1Facts *fact, DisasContext *ir1)
+{
+    uint32_t insn = ir1->insn;
+    bool sf = extract32(insn, 31, 1);
+    bool sbit = extract32(insn, 29, 1);
+    unsigned type = extract32(insn, 22, 2);
+    unsigned rmode = extract32(insn, 19, 2);
+    unsigned opcode = extract32(insn, 16, 3);
+    unsigned rn = extract32(insn, 5, 5);
+    unsigned rd = extract32(insn, 0, 5);
+
+    if (sbit || !scalar_fp_type_is_16_32_64(ir1, type)) {
+        fact_exception_boundary(fact);
         return true;
     }
-    if ((insn & 0xbf208c00) == 0x0e000000) {
+
+    switch (opcode) {
+    case 2: /* SCVTF */
+    case 3: /* UCVTF */
+        if (rmode != 0) {
+            fact_exception_boundary(fact);
+            return true;
+        }
+        fact_use(fact, rn, sf);
+        fact_vec_def(fact, rd);
+        return true;
+    case 0: /* FCVT[NPMZ]S */
+    case 1: /* FCVT[NPMZ]U */
+    case 4: /* FCVTAS */
+    case 5: /* FCVTAU */
+    {
+        bool is_signed = !(opcode & 1);
+        bool helper_possible;
+
+        if ((opcode & 4) && rmode != 0) {
+            fact_exception_boundary(fact);
+            return true;
+        }
+        fact_vec_use(fact, rn);
+        fact_def(fact, rd, !sf);
+        if (is_signed) {
+            helper_possible = (opcode & 4) && type != 0;
+        } else {
+            helper_possible = type == 3 ||
+                              !((!sf && type == 0) ||
+                                (rmode == 3 && type <= 1));
+        }
+        if (helper_possible) {
+            fact_helper_boundary(fact);
+        }
         return true;
     }
+    default:
+        break;
+    }
+
+    switch ((sf << 7) | (type << 5) | (rmode << 3) | opcode) {
+    case 0b01100110: /* FMOV half -> 32-bit int */
+    case 0b11100110: /* FMOV half -> 64-bit int */
+    case 0b00000110: /* FMOV 32-bit */
+        fact_vec_use(fact, rn);
+        fact_def(fact, rd, true);
+        return true;
+    case 0b10100110: /* FMOV 64-bit */
+    case 0b11001110: /* FMOV top half of 128-bit */
+        fact_vec_use(fact, rn);
+        fact_def(fact, rd, false);
+        return true;
+    case 0b01100111: /* FMOV 32-bit int -> half */
+    case 0b00000111: /* FMOV 32-bit int -> float */
+        fact_use(fact, rn, false);
+        fact_vec_def(fact, rd);
+        return true;
+    case 0b11100111: /* FMOV 64-bit int -> half */
+        fact_use(fact, rn, false);
+        fact_vec_def(fact, rd);
+        return true;
+    case 0b10100111: /* FMOV 64-bit int -> double */
+        fact_use(fact, rn, true);
+        fact_vec_def(fact, rd);
+        return true;
+    case 0b11001111: /* FMOV 64-bit int -> top half of 128-bit */
+        fact_use(fact, rn, true);
+        fact_vec_use(fact, rd);
+        fact_vec_def(fact, rd);
+        return true;
+    case 0b00111110: /* FJCVTZS */
+        fact_vec_use(fact, rn);
+        fact_def(fact, rd, true);
+        fact->nzcv_def |= LATA_NZCV_ALL;
+        fact_exception_boundary(fact);
+        return true;
+    default:
+        fact_exception_boundary(fact);
+        return true;
+    }
+}
+
+static bool fact_fp_int_conv_encoding(uint32_t insn)
+{
+    return (insn & 0x5f20fc00) == 0x1e200000;
+}
+
+static bool fact_fp_fixed_conv(LataIR1Facts *fact, DisasContext *ir1)
+{
+    uint32_t insn = ir1->insn;
+    bool sf = extract32(insn, 31, 1);
+    bool sbit = extract32(insn, 29, 1);
+    unsigned type = extract32(insn, 22, 2);
+    unsigned rmode = extract32(insn, 19, 2);
+    unsigned opcode = extract32(insn, 16, 3);
+    unsigned scale = extract32(insn, 10, 6);
+    unsigned rn = extract32(insn, 5, 5);
+    unsigned rd = extract32(insn, 0, 5);
+
+    if (sbit || (!sf && scale < 32) ||
+        !scalar_fp_type_is_16_32_64(ir1, type)) {
+        fact_exception_boundary(fact);
+        return true;
+    }
+
+    switch ((rmode << 3) | opcode) {
+    case 0x2: /* SCVTF */
+    case 0x3: /* UCVTF */
+        fact_use(fact, rn, sf);
+        fact_vec_def(fact, rd);
+        return true;
+    case 0x18: /* FCVTZS */
+    case 0x19: /* FCVTZU */
+        fact_vec_use(fact, rn);
+        fact_def(fact, rd, !sf);
+        if (type == 3 || opcode == 1 || scale != 64) {
+            fact_helper_boundary(fact);
+        }
+        return true;
+    default:
+        fact_exception_boundary(fact);
+        return true;
+    }
+}
+
+static void fact_scalar_fp(LataIR1Facts *fact, DisasContext *ir1)
+{
+    uint32_t insn = ir1->insn;
+    unsigned rd = extract32(insn, 0, 5);
+    unsigned rn = extract32(insn, 5, 5);
+    unsigned ra = extract32(insn, 10, 5);
+    unsigned rm = extract32(insn, 16, 5);
+
+    if (extract32(insn, 24, 1)) {
+        if (!scalar_fp_3src_supported(insn)) {
+            fact_helper_boundary(fact);
+            return;
+        }
+        fact_vec_def(fact, rd);
+        fact_vec_use(fact, rn);
+        fact_vec_use(fact, rm);
+        fact_vec_use(fact, ra);
+        return;
+    }
+
+    if (!extract32(insn, 21, 1)) {
+        fact_fp_fixed_conv(fact, ir1);
+        return;
+    }
+
+    if (fact_fp_int_conv_encoding(insn)) {
+        fact_fp_int_conv(fact, ir1);
+        return;
+    }
+
+    switch (extract32(insn, 10, 2)) {
+    case 1: /* Floating point conditional compare */
+        if (!scalar_fp_ccomp_supported(insn)) {
+            fact_helper_boundary(fact);
+            break;
+        }
+        fact_vec_use(fact, rn);
+        fact_vec_use(fact, rm);
+        fact->nzcv_use |= nzcv_mask_from_cond(extract32(insn, 12, 4));
+        fact->nzcv_def |= LATA_NZCV_ALL;
+        break;
+    case 2: /* Floating point data-processing (2 source) */
+        if (!scalar_fp_2src_supported(insn)) {
+            fact_helper_boundary(fact);
+            break;
+        }
+        fact_vec_def(fact, rd);
+        fact_vec_use(fact, rn);
+        fact_vec_use(fact, rm);
+        break;
+    case 3: /* Floating point conditional select */
+        if (!scalar_fp_csel_supported(insn)) {
+            fact_helper_boundary(fact);
+            break;
+        }
+        fact_vec_def(fact, rd);
+        fact_vec_use(fact, rn);
+        fact_vec_use(fact, rm);
+        fact->nzcv_use |= nzcv_mask_from_cond(extract32(insn, 12, 4));
+        break;
+    case 0:
+        switch (ctz32(extract32(insn, 12, 4))) {
+        case 0: /* Floating point immediate */
+            if (!scalar_fp_imm_supported(ir1, insn)) {
+                fact_helper_boundary(fact);
+                break;
+            }
+            fact_vec_def(fact, rd);
+            break;
+        case 1: { /* Floating point compare */
+            bool cmp_with_zero = extract32(insn, 3, 2) & 1;
+
+            if (!scalar_fp_compare_supported(insn)) {
+                fact_helper_boundary(fact);
+                break;
+            }
+            fact_vec_use(fact, rn);
+            if (!cmp_with_zero) {
+                fact_vec_use(fact, rm);
+            }
+            fact->nzcv_def |= LATA_NZCV_ALL;
+            break;
+        }
+        case 2: /* Floating point data-processing (1 source) */
+            if (!scalar_fp_1src_supported(ir1, insn)) {
+                fact_helper_boundary(fact);
+                break;
+            }
+            fact_vec_def(fact, rd);
+            fact_vec_use(fact, rn);
+            break;
+        case 3:
+            fact_helper_boundary(fact);
+            break;
+        default:
+            fact_fp_int_conv(fact, ir1);
+            break;
+        }
+        break;
+    }
+}
+
+static bool fact_simd_copy(LataIR1Facts *fact, uint32_t insn)
+{
+    unsigned rd = extract32(insn, 0, 5);
+    unsigned rn = extract32(insn, 5, 5);
+    unsigned imm4 = extract32(insn, 11, 4);
+    unsigned imm5 = extract32(insn, 16, 5);
+    bool op = extract32(insn, 29, 1);
+    bool is_q = extract32(insn, 30, 1);
+    unsigned size = imm5 ? ctz32(imm5) : 4;
+
+    if ((insn & 0x9fe08400) != 0x0e000400) {
+        return false;
+    }
+
+    if (op) {
+        if (!is_q || size > 3) {
+            fact_helper_boundary(fact);
+            return true;
+        }
+        fact_vec_use(fact, rd);
+        fact_vec_use(fact, rn);
+        fact_vec_def(fact, rd);
+        return true;
+    }
+
+    switch (imm4) {
+    case 0: /* DUP element */
+        if (size > 3 || (size == 3 && !is_q)) {
+            fact_helper_boundary(fact);
+            break;
+        }
+        fact_vec_use(fact, rn);
+        fact_vec_def(fact, rd);
+        break;
+    case 1: /* DUP general */
+        if (size > 3 || (size == 3 && !is_q)) {
+            fact_helper_boundary(fact);
+            break;
+        }
+        fact_use(fact, rn, size == 3);
+        fact_vec_def(fact, rd);
+        break;
+    case 3: /* INS general */
+        if (!is_q || size > 3) {
+            fact_helper_boundary(fact);
+            break;
+        }
+        fact_vec_use(fact, rd);
+        fact_use(fact, rn, size == 3);
+        fact_vec_def(fact, rd);
+        break;
+    case 5: /* SMOV */
+    case 7: { /* UMOV */
+        bool is_signed = imm4 == 5;
+        bool high_zero = is_signed ? !is_q : !(is_q && size == 3);
+        bool invalid = is_signed ?
+                       size > 2 || (size == 2 && !is_q) :
+                       size > 3 || (size < 3 && is_q) ||
+                       (size == 3 && !is_q);
+
+        if (invalid) {
+            fact_helper_boundary(fact);
+            break;
+        }
+        fact_vec_use(fact, rn);
+        fact_def(fact, rd, high_zero);
+        break;
+    }
+    default:
+        fact_helper_boundary(fact);
+        break;
+    }
+    return true;
+}
+
+static bool fact_simd_scalar_copy(LataIR1Facts *fact, uint32_t insn)
+{
+    unsigned rd = extract32(insn, 0, 5);
+    unsigned rn = extract32(insn, 5, 5);
+    unsigned imm5 = extract32(insn, 16, 5);
+    unsigned size = imm5 ? ctz32(imm5) : 4;
+
+    if ((insn & 0xdfe08400) != 0x5e000400) {
+        return false;
+    }
+    if (extract32(insn, 29, 1) || extract32(insn, 11, 4) != 0 ||
+        size > 3) {
+        fact_helper_boundary(fact);
+        return true;
+    }
+    fact_vec_use(fact, rn);
+    fact_vec_def(fact, rd);
+    return true;
+}
+
+static bool fact_simd_crypto(LataIR1Facts *fact, uint32_t insn)
+{
+    unsigned top = insn >> 24;
+    unsigned rd = extract32(insn, 0, 5);
+    unsigned rn = extract32(insn, 5, 5);
+    unsigned rm = extract32(insn, 16, 5);
+    unsigned ra = extract32(insn, 10, 5);
+
+    if (top == 0x4e) {
+        if ((insn & 0xff3e0c00) != 0x4e280800) {
+            return false;
+        }
+        fact_vec_use(fact, rd);
+        fact_vec_use(fact, rn);
+        fact_vec_def(fact, rd);
+        fact_exception_boundary(fact);
+        return true;
+    }
+
+    if (top == 0x5e) {
+        if ((insn & 0xff208c00) == 0x5e000000) {
+            fact_vec_use(fact, rd);
+            fact_vec_use(fact, rn);
+            fact_vec_use(fact, rm);
+            fact_vec_def(fact, rd);
+            fact_helper_boundary(fact);
+            return true;
+        }
+        if ((insn & 0xff3e0c00) == 0x5e280800) {
+            fact_vec_use(fact, rd);
+            fact_vec_use(fact, rn);
+            fact_vec_def(fact, rd);
+            fact_helper_boundary(fact);
+            return true;
+        }
+        return false;
+    }
+
+    if (top == 0xce) {
+        fact_vec_use(fact, rn);
+        fact_vec_use(fact, rm);
+        if ((insn & 0xff808000) == 0xce000000) {
+            fact_vec_use(fact, ra);
+        }
+        fact_vec_def(fact, rd);
+        if ((insn & 0xff808000) != 0xce000000 &&
+            (insn & 0xffe00000) != 0xce800000) {
+            fact_helper_boundary(fact);
+        }
+        return true;
+    }
+
     return false;
 }
 
@@ -332,6 +955,16 @@ static void fact_simd_fp(LataIR1Facts *fact, DisasContext *ir1)
     unsigned rn = extract32(insn, 5, 5);
     unsigned ra = extract32(insn, 10, 5);
     unsigned rm = extract32(insn, 16, 5);
+
+    if (simd_fp_is_scalar_fp(insn)) {
+        fact_scalar_fp(fact, ir1);
+        return;
+    }
+    if (fact_simd_crypto(fact, insn) ||
+        fact_simd_copy(fact, insn) ||
+        fact_simd_scalar_copy(fact, insn)) {
+        return;
+    }
 
     fact_vec_def(fact, rd);
     fact_vec_use(fact, rn);
@@ -344,9 +977,15 @@ static void fact_simd_fp(LataIR1Facts *fact, DisasContext *ir1)
         extract32(insn, 12, 1)) {
         fact_vec_use(fact, rd);
     }
-    if (simd_fp_uses_helper(insn)) {
-        fact->helper_boundary = true;
-        fact->state_boundary = true;
+    if ((insn & 0xbf208c00) == 0x0e000000) {
+        fact_helper_boundary(fact);
+    }
+}
+
+static void fact_crypto(LataIR1Facts *fact, DisasContext *ir1)
+{
+    if (!fact_simd_crypto(fact, ir1->insn)) {
+        fact_helper_boundary(fact);
     }
 }
 
@@ -367,6 +1006,7 @@ static const LataGPRRule gpr_rules[] = {
     { AARCH64_A64_MOVZ, fact_movw },
     { AARCH64_A64_MOVK, fact_movw },
     { AARCH64_A64_SYS, fact_sys },
+    { AARCH64_A64_CRYPTO, fact_crypto },
     { AARCH64_A64_DATA_PROC_REG, fact_dataproc_reg },
     { AARCH64_A64_DATA_PROC_SIMD_FD, fact_simd_fp },
     { AARCH64_A64_EXCP_ILLEGAL, NULL },
@@ -405,9 +1045,7 @@ static bool sysreg_is_nzcv(DisasContext *ir1)
 {
     arg_SYS *a = &ir1->arg.f_decode_insn3218;
 
-    return ir1->insn_type == AARCH64_A64_SYS &&
-           a->op0 == 3 && a->op1 == 3 && a->crn == 4 &&
-           a->crm == 2 && a->op2 == 0;
+    return ir1->insn_type == AARCH64_A64_SYS && sys_args_are_nzcv(a);
 }
 
 static void analyze_nzcv_fact(LataIR1Facts *fact, DisasContext *ir1)
@@ -433,6 +1071,9 @@ static void analyze_nzcv_fact(LataIR1Facts *fact, DisasContext *ir1)
     if ((insn & 0xffe07c10) == 0xba000400) {
         fact->nzcv_def |= nzcv_mask_from_rmif(insn);
     }
+    if ((insn & 0xfffffc00) == 0x1e7e0000) {
+        fact->nzcv_def |= LATA_NZCV_ALL;
+    }
     if (sysreg_is_nzcv(ir1)) {
         if (ir1->arg.f_decode_insn3218.l) {
             fact->nzcv_use |= LATA_NZCV_ALL;
@@ -447,6 +1088,7 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
     uint32_t insn = ir1->insn;
     unsigned op0 = extract32(insn, 25, 4);
     bool sf = extract32(insn, 31, 1);
+    bool exclusive_state;
     bool table_handled = false;
 
     for (const LataGPRRule *rule = gpr_rules; rule->fn; rule++) {
@@ -458,6 +1100,34 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
     }
 
     switch (ir1->insn_type) {
+    case AARCH64_A64_NULL:
+        fact_helper_boundary(fact);
+        return;
+    case AARCH64_A64_NOP:
+    case AARCH64_A64_ESB:
+    case AARCH64_A64_XPACLRI:
+    case AARCH64_A64_PACIA1716:
+    case AARCH64_A64_PACIB1716:
+    case AARCH64_A64_AUTIA1716:
+    case AARCH64_A64_AUTIB1716:
+    case AARCH64_A64_PACIAZ:
+    case AARCH64_A64_PACIASP:
+    case AARCH64_A64_PACIBZ:
+    case AARCH64_A64_PACIBSP:
+    case AARCH64_A64_AUTIAZ:
+    case AARCH64_A64_AUTIASP:
+    case AARCH64_A64_AUTIBZ:
+    case AARCH64_A64_AUTIBSP:
+    case AARCH64_A64_CFINV:
+    case AARCH64_A64_XAFLAG:
+    case AARCH64_A64_AXFLAG:
+        break;
+    case AARCH64_A64_RMIF:
+        fact_rmif(fact, ir1);
+        break;
+    case AARCH64_A64_FCADD:
+        fact_fcadd(fact, ir1);
+        break;
     case AARCH64_A64_B:
     case AARCH64_A64_B_cond:
     case AARCH64_A64_SVC:
@@ -467,71 +1137,103 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
         fact_use(fact, extract32(insn, 0, 5), sf);
         break;
     case AARCH64_A64_TBZ:
-        fact_use(fact, extract32(insn, 0, 5), true);
+        fact_use(fact, extract32(insn, 0, 5),
+                 ir1->arg.f_tbz.bitpos >= 32);
         break;
     case AARCH64_A64_BR:
-    case AARCH64_A64_BLR:
     case AARCH64_A64_RET:
         fact_use(fact, extract32(insn, 5, 5), true);
-        fact->state_boundary = true;
+        fact_state_boundary(fact);
+        break;
+    case AARCH64_A64_BLR:
+        fact_use(fact, extract32(insn, 5, 5), true);
+        fact_def(fact, 30, false);
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_BL:
         fact_def(fact, 30, false);
-        fact->state_boundary = true;
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_ADR:
     case AARCH64_A64_ADRP:
-        fact_def(fact, extract32(insn, 0, 5), !sf);
+        fact_def(fact, extract32(insn, 0, 5), false);
         break;
     case AARCH64_A64_LD_lit:
-        fact_def(fact, extract32(insn, 0, 5), !sf);
+        if (ir1->arg.f_ldlit.sz != 3 || ir1->arg.f_ldlit.sign) {
+            fact_helper_boundary(fact);
+            break;
+        }
+        fact_def(fact, ir1->arg.f_ldlit.rt,
+                 ir1->arg.f_ldlit.sz != 3 && !ir1->arg.f_ldlit.sign);
         break;
     case AARCH64_A64_LDP:
+        if (df_ldstpair_wback_alias(&ir1->arg.f_ldstpair)) {
+            fact_helper_boundary(fact);
+            break;
+        }
         fact_mem_pair_addr(fact, &ir1->arg.f_ldstpair);
         fact_def(fact, ir1->arg.f_ldstpair.rt,
-                 ir1->arg.f_ldstpair.sz != 3);
+                 df_pair_load_high_zero(&ir1->arg.f_ldstpair));
         fact_def(fact, ir1->arg.f_ldstpair.rt2,
-                 ir1->arg.f_ldstpair.sz != 3);
+                 df_pair_load_high_zero(&ir1->arg.f_ldstpair));
         break;
     case AARCH64_A64_LDR:
         fact_mem_reg_addr(fact, &ir1->arg.f_ldst);
-        fact_def(fact, ir1->arg.f_ldst.rt, ir1->arg.f_ldst.sz != 3);
+        fact_def(fact, ir1->arg.f_ldst.rt,
+                 df_load_high_zero(ir1->arg.f_ldst.sz,
+                                   ir1->arg.f_ldst.sign,
+                                   ir1->arg.f_ldst.ext));
         break;
     case AARCH64_A64_LDR_i:
+        if (df_ldst_imm_wback_alias(&ir1->arg.f_ldst_imm)) {
+            fact_helper_boundary(fact);
+            break;
+        }
         fact_mem_imm_addr(fact, &ir1->arg.f_ldst_imm);
         fact_def(fact, ir1->arg.f_ldst_imm.rt,
-                 ir1->arg.f_ldst_imm.sz != 3);
+                 df_load_high_zero(ir1->arg.f_ldst_imm.sz,
+                                   ir1->arg.f_ldst_imm.sign,
+                                   ir1->arg.f_ldst_imm.ext));
         break;
     case AARCH64_A64_LDAR:
         fact_mem_stlr_addr(fact, &ir1->arg.f_stlr);
         fact_def(fact, ir1->arg.f_stlr.rt, ir1->arg.f_stlr.sz != 3);
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_LDAPR:
         fact_ldapr_addr(fact, &ir1->arg.f_decode_insn3227);
         fact_def(fact, ir1->arg.f_decode_insn3227.rt,
                  ir1->arg.f_decode_insn3227.sz != 3);
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_LDAPR_i:
         fact_mem_ldapr_stlr_addr(fact, &ir1->arg.f_ldapr_stlr_i);
         fact_def(fact, ir1->arg.f_ldapr_stlr_i.rt,
-                 ir1->arg.f_ldapr_stlr_i.sz != 3);
+                 df_load_high_zero(ir1->arg.f_ldapr_stlr_i.sz,
+                                   ir1->arg.f_ldapr_stlr_i.sign,
+                                   ir1->arg.f_ldapr_stlr_i.ext));
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_LDXR:
         fact_mem_stxr_addr(fact, &ir1->arg.f_stxr);
         fact_def(fact, ir1->arg.f_stxr.rt, ir1->arg.f_stxr.sz != 3);
-        fact->state_boundary = true;
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_LDXP:
         fact_mem_stxr_addr(fact, &ir1->arg.f_stxr);
-        fact_def(fact, ir1->arg.f_stxr.rt, false);
-        fact_def(fact, ir1->arg.f_stxr.rt2, false);
-        fact->state_boundary = true;
+        fact_def(fact, ir1->arg.f_stxr.rt, ir1->arg.f_stxr.sz == 2);
+        fact_def(fact, ir1->arg.f_stxr.rt2, ir1->arg.f_stxr.sz == 2);
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_STR:
         fact_mem_reg_addr(fact, &ir1->arg.f_ldst);
         fact_use(fact, ir1->arg.f_ldst.rt, ir1->arg.f_ldst.sz == 3);
         break;
     case AARCH64_A64_STP:
+        if (df_ldstpair_wback_alias(&ir1->arg.f_ldstpair)) {
+            fact_helper_boundary(fact);
+            break;
+        }
         fact_mem_pair_addr(fact, &ir1->arg.f_ldstpair);
         fact_use(fact, ir1->arg.f_ldstpair.rt,
                  ir1->arg.f_ldstpair.sz == 3);
@@ -539,31 +1241,41 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
                  ir1->arg.f_ldstpair.sz == 3);
         break;
     case AARCH64_A64_STR_i:
+        if (df_ldst_imm_wback_alias(&ir1->arg.f_ldst_imm)) {
+            fact_helper_boundary(fact);
+            break;
+        }
         fact_mem_imm_addr(fact, &ir1->arg.f_ldst_imm);
         fact_use(fact, ir1->arg.f_ldst_imm.rt,
                  ir1->arg.f_ldst_imm.sz == 3);
         break;
     case AARCH64_A64_STLR:
+        if (df_stlr_unallocated(&ir1->arg.f_stlr)) {
+            fact_helper_boundary(fact);
+            break;
+        }
         fact_mem_stlr_addr(fact, &ir1->arg.f_stlr);
         fact_use(fact, ir1->arg.f_stlr.rt, ir1->arg.f_stlr.sz == 3);
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_STLR_i:
         fact_mem_ldapr_stlr_addr(fact, &ir1->arg.f_ldapr_stlr_i);
         fact_use(fact, ir1->arg.f_ldapr_stlr_i.rt,
                  ir1->arg.f_ldapr_stlr_i.sz == 3);
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_STXR:
         fact_mem_stxr_addr(fact, &ir1->arg.f_stxr);
         fact_use(fact, ir1->arg.f_stxr.rt, ir1->arg.f_stxr.sz == 3);
         fact_def(fact, ir1->arg.f_stxr.rs, true);
-        fact->state_boundary = true;
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_STXP:
         fact_mem_stxr_addr(fact, &ir1->arg.f_stxr);
-        fact_use(fact, ir1->arg.f_stxr.rt, true);
-        fact_use(fact, ir1->arg.f_stxr.rt2, true);
+        fact_use(fact, ir1->arg.f_stxr.rt, ir1->arg.f_stxr.sz == 3);
+        fact_use(fact, ir1->arg.f_stxr.rt2, ir1->arg.f_stxr.sz == 3);
         fact_def(fact, ir1->arg.f_stxr.rs, true);
-        fact->state_boundary = true;
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_LDR_v:
         fact_mem_reg_addr(fact, &ir1->arg.f_ldst);
@@ -579,7 +1291,7 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
         fact_vec_def(fact, ir1->arg.f_ldstpair.rt2);
         break;
     case AARCH64_A64_LD_lit_v:
-        fact_vec_def(fact, extract32(insn, 0, 5));
+        fact_helper_boundary(fact);
         break;
     case AARCH64_A64_LD_mult:
         fact_mem_mult_addr(fact, &ir1->arg.f_ldst_mult);
@@ -588,10 +1300,18 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
                            ir1->arg.f_ldst_mult.selem);
         break;
     case AARCH64_A64_LD_single:
-    case AARCH64_A64_LD_single_repl:
         fact_mem_single_addr(fact, &ir1->arg.f_ldst_single);
         fact_vec_range_def(fact, ir1->arg.f_ldst_single.rt,
                            ir1->arg.f_ldst_single.selem);
+        break;
+    case AARCH64_A64_LD_single_repl:
+        fact_use_sp_addr(fact, ir1->arg.f_decode_insn3232.rn);
+        if (ir1->arg.f_decode_insn3232.p) {
+            fact_use(fact, ir1->arg.f_decode_insn3232.rm, true);
+            fact_def(fact, ir1->arg.f_decode_insn3232.rn, false);
+        }
+        fact_vec_range_def(fact, ir1->arg.f_decode_insn3232.rt,
+                           ir1->arg.f_decode_insn3232.selem);
         break;
     case AARCH64_A64_STR_v:
         fact_mem_reg_addr(fact, &ir1->arg.f_ldst);
@@ -629,6 +1349,7 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
         fact_atomic_addr(fact, &ir1->arg.f_atomic);
         fact_use(fact, ir1->arg.f_atomic.rs, ir1->arg.f_atomic.sz == 3);
         fact_def(fact, ir1->arg.f_atomic.rt, ir1->arg.f_atomic.sz != 3);
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_CAS:
         fact_cas_addr(fact, &ir1->arg.f_decode_insn3221);
@@ -638,22 +1359,72 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
                  ir1->arg.f_decode_insn3221.sz == 3);
         fact_def(fact, ir1->arg.f_decode_insn3221.rs,
                  ir1->arg.f_decode_insn3221.sz != 3);
+        fact_state_boundary(fact);
         break;
     case AARCH64_A64_CASP:
+        if ((ir1->arg.f_decode_insn3221.rs & 1) ||
+            (ir1->arg.f_decode_insn3221.rt & 1) ||
+            ir1->arg.f_decode_insn3221.sz < 2) {
+            fact_helper_boundary(fact);
+            break;
+        }
         fact_cas_addr(fact, &ir1->arg.f_decode_insn3221);
-        fact_use(fact, ir1->arg.f_decode_insn3221.rs, true);
-        fact_use(fact, ir1->arg.f_decode_insn3221.rs + 1, true);
-        fact_use(fact, ir1->arg.f_decode_insn3221.rt, true);
-        fact_use(fact, ir1->arg.f_decode_insn3221.rt + 1, true);
-        fact_def(fact, ir1->arg.f_decode_insn3221.rs, false);
-        fact_def(fact, ir1->arg.f_decode_insn3221.rs + 1, false);
-        fact->state_boundary = true;
+        exclusive_state = ir1->arg.f_decode_insn3221.sz == 3;
+        fact_use(fact, ir1->arg.f_decode_insn3221.rs, exclusive_state);
+        fact_use(fact, ir1->arg.f_decode_insn3221.rs + 1, exclusive_state);
+        fact_use(fact, ir1->arg.f_decode_insn3221.rt, exclusive_state);
+        fact_use(fact, ir1->arg.f_decode_insn3221.rt + 1, exclusive_state);
+        fact_def(fact, ir1->arg.f_decode_insn3221.rs, !exclusive_state);
+        fact_def(fact, ir1->arg.f_decode_insn3221.rs + 1, !exclusive_state);
+        fact_state_boundary(fact);
+        break;
+    case AARCH64_A64_CLREX:
+    case AARCH64_A64_DSB_DMB:
+    case AARCH64_A64_ISB:
+    case AARCH64_A64_SB:
+    case AARCH64_A64_WFI:
+    case AARCH64_A64_WFE:
+    case AARCH64_A64_YIELD:
+        fact_state_boundary(fact);
+        break;
+    case AARCH64_A64_ADDG_i:
+    case AARCH64_A64_SUBG_i:
+    case AARCH64_A64_BRA:
+    case AARCH64_A64_BRAZ:
+    case AARCH64_A64_BLRA:
+    case AARCH64_A64_BLRAZ:
+    case AARCH64_A64_RETA:
+    case AARCH64_A64_ERET:
+    case AARCH64_A64_ERETA:
+    case AARCH64_A64_HVC:
+    case AARCH64_A64_SMC:
+    case AARCH64_A64_HLT:
+    case AARCH64_A64_LDRA:
+    case AARCH64_A64_STGP:
+    case AARCH64_A64_LDG:
+    case AARCH64_A64_LDGM:
+    case AARCH64_A64_STG:
+    case AARCH64_A64_STZG:
+    case AARCH64_A64_ST2G:
+    case AARCH64_A64_STZ2G:
+    case AARCH64_A64_STGM:
+    case AARCH64_A64_STZGM:
+    case AARCH64_A64_MSR_i_DAIFCLEAR:
+    case AARCH64_A64_MSR_i_DAIFSET:
+    case AARCH64_A64_MSR_i_DIT:
+    case AARCH64_A64_MSR_i_PAN:
+    case AARCH64_A64_MSR_i_SBSS:
+    case AARCH64_A64_MSR_i_SPSEL:
+    case AARCH64_A64_MSR_i_SVCR:
+    case AARCH64_A64_MSR_i_TCO:
+    case AARCH64_A64_MSR_i_UAO:
+        fact_helper_boundary(fact);
         break;
     default:
         break;
     }
 
-    if (!table_handled &&
+    if (!table_handled && ir1->insn_type == AARCH64_A64_NULL &&
         ir1->insn_type != AARCH64_A64_DATA_PROC_REG &&
         (op0 == 0x4 || op0 == 0x6 || op0 == 0x8 || op0 == 0xa)) {
         unsigned rd = extract32(insn, 0, 5);
@@ -667,7 +1438,7 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
         fact_def(fact, rd, !sf);
     }
 
-    if (!table_handled &&
+    if (!table_handled && ir1->insn_type == AARCH64_A64_NULL &&
         ((insn & 0x1f000000) == 0x11000000 ||
          (insn & 0x1f000000) == 0x12000000)) {
         unsigned rd = extract32(insn, 0, 5);
@@ -677,7 +1448,7 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
         fact_def(fact, rd, !sf);
     }
 
-    if (!table_handled &&
+    if (!table_handled && ir1->insn_type == AARCH64_A64_NULL &&
         ir1->insn_type != AARCH64_A64_DATA_PROC_REG &&
         ((insn & 0x1f000000) == 0x0a000000 ||
          (insn & 0x1f000000) == 0x1a000000)) {
@@ -702,8 +1473,6 @@ static void lata_df_analyze_ir1(LataIR1Facts *fact, DisasContext *ir1)
     case AARCH64_A64_SVC:
     case AARCH64_A64_BRK:
     case AARCH64_A64_HLT:
-    case AARCH64_A64_SYS:
-    case AARCH64_A64_CRYPTO:
     case AARCH64_A64_EXCP_ILLEGAL:
     case AARCH64_A64_EXCP_BTI:
         fact->helper_boundary = true;

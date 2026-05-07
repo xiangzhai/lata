@@ -146,6 +146,53 @@ check_x19:
         b.eq    pass
         b       fail
 """,
+    "ldrsw_high_live_across_tu_edge": r"""
+        .text
+        .global _start
+_start:
+        sub     sp, sp, #16
+        mov     w19, #-1
+        str     w19, [sp]
+        ldrsw   x20, [sp]
+        add     sp, sp, #16
+        b       check_x20
+        b       fail
+check_x20:
+        lsr     x21, x20, #32
+        mov     w22, #-1
+        cmp     x21, x22
+        b.ne    fail
+        cmp     x20, #-1
+        b.eq    pass
+        b       fail
+""",
+    "tbz_low_bit_does_not_need_high": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #-1
+        mov     w19, #2
+        b       check_low_bit
+        b       fail
+check_low_bit:
+        tbz     x19, #0, pass
+        b       fail
+""",
+    "tbz_high_bit_needs_high": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #-1
+        mov     w19, #0
+        mov     x20, #1
+        lsl     x20, x20, #40
+        orr     x19, x19, x20
+        b       check_high_bit
+        b       fail
+check_high_bit:
+        tbnz    x19, #40, pass
+        b       fail
+""",
     "nzcv_live_across_direct_edge": r"""
         .text
         .global _start
@@ -306,6 +353,30 @@ _start:
         b.eq    pass
         b       fail
 """,
+    "rmif_reads_xn_and_updates_masked_nzcv": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #0
+        cmp     x19, #0
+        mov     x20, #0
+        movk    x20, #0xf000, lsl #48
+        b       update_flags
+        b       fail
+update_flags:
+        rmif    x20, #60, #0xf
+        b.mi    1f
+        b       fail
+1:
+        b.eq    2f
+        b       fail
+2:
+        b.cs    3f
+        b       fail
+3:
+        b.vs    pass
+        b       fail
+""",
     "fcsel_nzcv_live_across_tu_edge": r"""
         .text
         .global _start
@@ -324,6 +395,23 @@ check_fcsel:
         movk    x21, #0
         movk    x21, #0x3ff0, lsl #48
         cmp     x20, x21
+        b.eq    pass
+        b       fail
+""",
+    "fcadd_vector_live_across_tu_edge": r"""
+        .text
+        .global _start
+_start:
+        fmov    s0, #1.0
+        movi    v1.4s, #0
+        b       do_fcadd
+        b       fail
+do_fcadd:
+        fcadd   v2.4s, v0.4s, v1.4s, #90
+        fmov    w20, s2
+        movz    w21, #0
+        movk    w21, #0x3f80, lsl #16
+        cmp     w20, w21
         b.eq    pass
         b       fail
 """,
@@ -601,6 +689,72 @@ linked_target:
         b.eq    pass
         b       fail
 """,
+    "peephole_high_clear_noop_addi": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #-1
+        mov     w19, #0x1234
+        ubfx    x19, x19, #0, #32
+        ubfx    x19, x19, #0, #32
+        add     x19, x19, #0
+        add     x19, x19, #0
+        movz    x20, #0x1234
+        cmp     x19, x20
+        b.eq    pass
+        b       fail
+""",
+    "peephole_move_chain_dead_write": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #41
+        mov     x20, x19
+        mov     x21, x20
+        mov     x22, #99
+        mov     x22, #42
+        add     x23, x21, #1
+        cmp     x23, x22
+        b.eq    pass
+        b       fail
+""",
+    "peephole_small_window": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #-1
+        mov     w19, #0x1234
+        mov     x22, #0
+        ubfx    x19, x19, #0, #32
+        add     x22, x22, #1
+        ubfx    x19, x19, #0, #32
+        mov     x23, #0
+        add     x23, x23, #1
+        add     x22, x22, #1
+        add     x23, x23, #2
+        movz    x20, #0x1234
+        cmp     x19, x20
+        b.ne    fail
+        cmp     x22, #2
+        b.ne    fail
+        cmp     x23, #3
+        b.eq    pass
+        b       fail
+""",
+}
+
+
+TEST_REQUIRED_OUTPUT = {
+    "peephole_high_clear_noop_addi": [
+        "high_clear=",
+        "noop=",
+    ],
+    "peephole_move_chain_dead_write": [
+        "move_chain=",
+    ],
+    "peephole_small_window": [
+        "window=",
+    ],
 }
 
 
@@ -679,6 +833,40 @@ def check_required_output(name, result, required):
     return True
 
 
+def parse_peephole_stat(text, key):
+    marker = f"{key}="
+    pos = text.find(marker)
+    if pos < 0:
+        return None
+    pos += len(marker)
+    end = pos
+    while end < len(text) and text[end].isdigit():
+        end += 1
+    if end == pos:
+        return None
+    return int(text[pos:end])
+
+
+def check_required_peephole_stats(name, result, required):
+    text = result.stdout + result.stderr
+    missing = []
+    zero = []
+
+    for needle in required:
+        key = needle[:-1] if needle.endswith("=") else needle
+        value = parse_peephole_stat(text, key)
+        if value is None:
+            missing.append(key)
+        elif value <= 0:
+            zero.append(key)
+
+    if missing or zero:
+        print(f"FAIL {name} peephole stats missing={missing} zero={zero}")
+        print(f"  stderr={result.stderr[:1000]!r}")
+        return False
+    return True
+
+
 def check_debug_surface_output(name, result):
     text = result.stdout + result.stderr
 
@@ -717,6 +905,8 @@ def main():
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
     has_debug_cli = qemu_supports_arg(args.qemu_lata, "-lata-dump")
+    has_peephole_stats = qemu_supports_arg(args.qemu_lata,
+                                           "-lata-peephole-stats")
     has_tu_debug = has_debug_cli and qemu_supports_arg(args.qemu_lata,
                                                        "-lata-tu-stats")
     if args.check_debug_surface and not has_tu_debug:
@@ -741,6 +931,9 @@ def main():
             return 1
     else:
         lata_runs = [("default", args.lata_arg)]
+    if has_peephole_stats:
+        lata_runs = [(label, run_args + ["-lata-peephole-stats"])
+                     for label, run_args in lata_runs]
 
     with tempfile.TemporaryDirectory(prefix="lata-tu-bintest-") as tmp:
         out_dir = Path(tmp)
@@ -757,6 +950,10 @@ def main():
                 if ok and args.require_lata_output:
                     ok = check_required_output(f"{name} {label}", result,
                                                args.require_lata_output)
+                if ok and has_peephole_stats and name in TEST_REQUIRED_OUTPUT:
+                    ok = check_required_peephole_stats(
+                        f"{name} {label}", result,
+                        TEST_REQUIRED_OUTPUT[name])
                 if ok and args.check_debug_surface:
                     ok = check_debug_surface_output(f"{name} {label}", result)
                 lata_results.append((label, ok, result))
