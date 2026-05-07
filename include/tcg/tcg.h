@@ -527,7 +527,7 @@ struct TCGContext {
     void *code_gen_ptr;
     void *data_gen_ptr;
 
-#ifdef CONFIG_SPLIT_TB
+#if defined(CONFIG_SPLIT_TB) || defined(CONFIG_LATA_TU)
     /* split TB code and TB ptr*/
     void *tb_gen_head;
     void *tb_gen_tail;

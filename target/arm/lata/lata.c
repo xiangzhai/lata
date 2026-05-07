@@ -528,6 +528,35 @@ void label_dispose(void)
                 tb->nzcv_save[1] = (label_num_to_ir2_num[label_id_1] << 2);
             }
 #endif
+#ifdef CONFIG_LATA_TU
+            if (tu_use_jmp(tb)) {
+                for (int i = 0; i < 2; i++) {
+                    LataTUEdge *edge = &tb->tu_edges[i];
+                    int label_id = edge->branch_offset;
+                    if (label_id != LATA_TU_EDGE_OFFSET_INVALID) {
+                        lsassert(label_id > 0 && label_id <= lsenv->tr_data->label_num);
+                        lsassertm(label_num_to_ir2_num[label_id] != -1,
+                                  "TU jump label %d is not inserted\n",
+                                  label_id);
+                        edge->branch_offset =
+                            (label_num_to_ir2_num[label_id] << 2);
+                    }
+                }
+
+                for (int i = 0; i < 2; i++) {
+                    LataTUEdge *edge = &tb->tu_edges[i];
+                    if (edge->unlink_stub_offset != TU_UNLINK_STUB_INVALID) {
+                        int label_id = edge->unlink_stub_offset;
+                        lsassert(label_id > 0 && label_id <= lsenv->tr_data->label_num);
+                        lsassertm(label_num_to_ir2_num[label_id] != -1,
+                                  "TU unlink label %d is not inserted\n",
+                                  label_id);
+                        edge->unlink_stub_offset =
+                            (label_num_to_ir2_num[label_id] << 2);
+                    }
+                }
+            }
+#endif
         }
     }
 
@@ -712,8 +741,7 @@ void lata_fast_jmp_cache_add(CPUArchState *env, uint64_t guest_pc, uint64_t host
 {
     if(option_fam_jmp_cache){
         if (guest_pc < env->mapping_range[0] || guest_pc >= env->mapping_range[1]) {
-            lsassertm(0, "option_fam_jmp_cache error pc, %lx, %lx, %lx\n",
-                    guest_pc, env->mapping_range[0], env->mapping_range[1]);
+            return;
         }
         uint64_t* pc_map_cache_ptr = (uint64_t*)env->pc_map_cache;
         pc_map_cache_ptr[guest_pc] = host_pc;  

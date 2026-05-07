@@ -1372,7 +1372,7 @@ TranslationBlock *tcg_tb_alloc(TCGContext *s)
     void *next;
 
  retry:
- #ifdef CONFIG_SPLIT_TB
+ #if defined(CONFIG_SPLIT_TB) || defined(CONFIG_LATA_TU)
     tb = (void *)ROUND_UP((uintptr_t)s->tb_gen_head, align);
     void *next_tb = (void *)ROUND_UP((uintptr_t)(tb + 1), align);
     if (unlikely(next_tb > s->tb_gen_highwater)) {
@@ -1409,7 +1409,7 @@ TranslationBlock *tcg_tb_alloc_full(TCGContext *s)
     struct separated_data *new_s_data;
 
  retry:
- #ifdef CONFIG_SPLIT_TB
+ #if defined(CONFIG_SPLIT_TB) || defined(CONFIG_LATA_TU)
     tb = (void *)ROUND_UP((uintptr_t)s->tb_gen_head, align);
     new_s_data = (void *)ROUND_UP((uintptr_t)(tb + 1), align);
     void *next_tb = (void *)ROUND_UP((uintptr_t)(new_s_data + 1), align);

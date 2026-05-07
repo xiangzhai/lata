@@ -44,6 +44,10 @@ struct tb_tc {
 #ifdef CONFIG_LATA_TU
 #define TU_TB_INDEX_NEXT 0
 #define TU_TB_INDEX_TARGET 1
+#define TU_UNLINK_STUB_INVALID 0xffffffff /* TU no unlink stub. */
+#define LATA_TU_EDGE_OFFSET_INVALID 0xffffffff
+
+typedef struct TranslationBlock TranslationBlock;
 
 typedef enum tu_tb_mode_type {
     TU_TB_MODE_NONE = 0,
@@ -72,6 +76,58 @@ typedef enum AARCH64_TYPE {
     IR1_TYPE_RET,
     IR1_TYPE_SYSCALL,
 } AARCH64_TYPE;
+
+typedef enum LataTUEdgeKind {
+    LATA_TU_EDGE_NONE = 0,
+    LATA_TU_EDGE_NEXT,
+    LATA_TU_EDGE_TARGET,
+} LataTUEdgeKind;
+
+typedef enum LataTUBranchKind {
+    LATA_TU_BRANCH_NONE = 0,
+    LATA_TU_BRANCH_B,
+    LATA_TU_BRANCH_BCC16,
+    LATA_TU_BRANCH_BCC20,
+} LataTUBranchKind;
+
+typedef enum LataTUEdgeState {
+    LATA_TU_EDGE_EMPTY = 0,
+    LATA_TU_EDGE_EMITTED,
+    LATA_TU_EDGE_LINKED,
+    LATA_TU_EDGE_UNLINKED,
+    LATA_TU_EDGE_RELINK_PENDING,
+} LataTUEdgeState;
+
+typedef enum LataTUFallbackReason {
+    LATA_TU_FALLBACK_NONE = 0,
+    LATA_TU_FALLBACK_CROSS_PAGE,
+    LATA_TU_FALLBACK_MODE_SWITCH,
+    LATA_TU_FALLBACK_TARGET_NOT_TRANSLATABLE,
+    LATA_TU_FALLBACK_EDGE_PC_MISMATCH,
+    LATA_TU_FALLBACK_UNSUPPORTED_TERMINATOR,
+    LATA_TU_FALLBACK_OVERLAP_SPLIT_FAILED,
+    LATA_TU_FALLBACK_OVERLAP_PREFIX,
+    LATA_TU_FALLBACK_MAX_TB_LIMIT,
+    LATA_TU_FALLBACK_BRANCH_RANGE,
+    LATA_TU_FALLBACK_ISLAND_RANGE,
+    LATA_TU_FALLBACK_INVALID_TARGET,
+    LATA_TU_FALLBACK_COUNT,
+} LataTUFallbackReason;
+
+typedef struct LataTUEdge {
+    LataTUEdgeKind kind;
+    LataTUBranchKind branch_kind;
+    LataTUEdgeState state;
+    LataTUFallbackReason fallback_reason;
+    uint64_t guest_pc;
+    TranslationBlock *target_tb;
+    uint32_t branch_offset;
+    uint32_t unlink_stub_offset;
+    uint32_t branch_island_offset;
+    uint32_t saved_insn;
+    uint64_t fallback_guest_pc;
+    uint32_t local_unlink_stub_offset;
+} LataTUEdge;
 #endif
 
 struct TranslationBlock {
@@ -185,16 +241,11 @@ struct TranslationBlock {
     int codesize;
 #endif
 #ifdef CONFIG_LATA_TU
-#define TU_UNLINK_STUB_INVALID 0xffffffff /* TU no unlink stub. */
-    union {
-        uint64_t target_pc;
-        uint32_t tu_unlink_stub_offset;
-    };
-    union {
-        uint64_t next_pc;
-        uint32_t tu_link_ins;
-    };
-    uint16_t tu_jmp[2];
+    uint64_t target_pc;
+    uint64_t next_pc;
+    bool tu_has_edges;
+    LataTUFallbackReason tu_fallback_reason;
+    LataTUEdge tu_edges[2];
     uint8_t *tu_search_addr;
     struct separated_data *s_data;
     TranslationBlock *next_tb[2];

@@ -476,6 +476,13 @@ cpu_tb_exec(CPUState *cpu, TranslationBlock *itb, int *tb_exit)
 
     trace_exec_tb_exit(last_tb, *tb_exit);
 
+#ifdef CONFIG_LATA_TU
+    if (*tb_exit <= TB_EXIT_IDX1 && last_tb &&
+        lata_tu_edge_is_unlinked(last_tb, *tb_exit)) {
+        lata_tu_mark_relink_pending(last_tb, *tb_exit);
+    }
+#endif
+
     if (*tb_exit > TB_EXIT_IDX1) {
         /* We didn't start executing this TB (eg because the instruction
          * counter hit zero); we must restore the guest PC to the address
@@ -669,6 +676,13 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
     if (tb_next->cflags & CF_INVALID) {
         goto out_unlock_next;
     }
+#ifdef CONFIG_LATA_TU
+    if (lata_tu_edge_need_relink(tb, n)) {
+        if (lata_tu_relink_edge(tb, n, tb_next)) {
+            goto out_unlock_next;
+        }
+    }
+#endif
     /* Atomically claim the jump destination slot only if it was NULL */
     old = qatomic_cmpxchg(&tb->jmp_dest[n], (uintptr_t)NULL,
                           (uintptr_t)tb_next);

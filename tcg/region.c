@@ -669,7 +669,7 @@ static int alloc_code_gen_buffer_splitwx(size_t size, Error **errp)
     return -1;
 }
 
-#ifdef CONFIG_SPLIT_TB
+#if defined(CONFIG_SPLIT_TB) || defined(CONFIG_LATA_TU)
 static bool alloc_tb_gen_head(size_t size)
 {
     void *buf;
@@ -797,7 +797,7 @@ void tcg_region_init(size_t tb_size, int splitwx, unsigned max_cpus)
     }
 
     have_prot = alloc_code_gen_buffer(tb_size, splitwx, &error_fatal);
-#ifdef CONFIG_SPLIT_TB
+#if defined(CONFIG_SPLIT_TB) || defined(CONFIG_LATA_TU)
     int head_have_prot, tail_have_prot;
     head_have_prot = alloc_tb_gen_head(tb_size);
     tail_have_prot = alloc_tb_gen_tail(tb_size);

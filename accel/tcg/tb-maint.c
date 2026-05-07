@@ -27,6 +27,9 @@
 #include "exec/translate-all.h"
 #include "sysemu/tcg.h"
 #include "tcg/tcg.h"
+#ifdef CONFIG_LATA_TU
+#include "target/arm/lata/include/tu.h"
+#endif
 #include "tb-hash.h"
 #include "tb-context.h"
 #include "internal.h"
@@ -852,6 +855,12 @@ static inline void tb_remove_from_jmp_list(TranslationBlock *orig, int n_orig)
  */
 void tb_reset_jump(TranslationBlock *tb, int n)
 {
+#ifdef CONFIG_LATA_TU
+    if (tu_use_jmp(tb) && lata_tu_edge_active(tb, n)) {
+        tu_unlink_branch(tb, n);
+        return;
+    }
+#endif
     uintptr_t addr = (uintptr_t)(tb->tc.ptr + tb->jmp_reset_offset[n]);
     tb_set_jmp_target(tb, n, addr);
 
