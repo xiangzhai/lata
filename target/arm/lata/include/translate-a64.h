@@ -8,11 +8,9 @@ void lata_gen_exit_tb_ret_0(DisasContext *s);
 void lata_gen_a64_update_pc(DisasContext *s, target_long diff);
 #ifdef CONFIG_LATA_TU
 void lata_emit_tu_unlink_stub(uint64_t guest_pc);
+DisasContext *tu_ir1_alloc(uint32_t count);
 #endif
 DisasContext *get_ir1_list(CPUState *cpu, TranslationBlock *tb, vaddr pc, int max_insns);
-#ifdef CONFIG_LATA_TU
-DisasContext *tu_get_ir1_list(uint32_t offset);
-#endif
 void target_disasm(struct TranslationBlock *tb, int *max_insns, CPUState *cpu);
 bool tr_ir2_generate(struct TranslationBlock *tb);
 void translate_aarch64_insn(DisasContext *s, CPUState *cpu);

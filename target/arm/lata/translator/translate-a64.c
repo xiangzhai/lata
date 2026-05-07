@@ -35,6 +35,9 @@
 #include "disas/disas.h"
 #include "semihosting/semihost.h"
 #include "cpregs.h"
+#include "exec/cpu-all.h"
+#include "exec/translation-block.h"
+#include "hw/core/cpu.h"
 
 enum a64_shift_type {
     A64_SHIFT_TYPE_LSL = 0,
@@ -197,6 +200,7 @@ void lata_gen_exit_tb_ret_0(DisasContext* s)
 
     ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, exit_offset >> 2);
     la_b(ir2_opnd_addr);
+    s->base->is_jmp = DISAS_NORETURN;
 }
 
 static void lata_gen_a64_update_pc_value(target_ulong dest)
@@ -210,6 +214,55 @@ void lata_gen_a64_update_pc(DisasContext* s, target_long diff)
     target_ulong dest = s->pc_curr + diff;
 
     lata_gen_a64_update_pc_value(dest);
+}
+
+static void lata_gen_exception_with_syndrome(DisasContext *s, uint32_t excp,
+                                             uint32_t syndrome)
+{
+    IR2_OPND temp;
+
+    if (clearGprHigh) {
+        for (int i = 0; i < 32; ++i) {
+            if (arm_la_map[i] >= 0) {
+                clear_gpr_high_for_boundary(i);
+            }
+        }
+    }
+
+    temp = ra_alloc_itemp();
+    li_d(temp, s->pc_curr);
+    la_st_d(temp, env_ir2_opnd, env_offset_pc());
+    lata_gen_call_helper_prologue(tcg_ctx);
+
+    // CPUARMState *env, uint32_t excp, uint32_t syndrome
+    la_mov64(a0_ir2_opnd, env_ir2_opnd);
+    li_d(a1_ir2_opnd, excp);
+    li_d(a2_ir2_opnd, syndrome);
+
+    li_d(temp, (uint64_t)helper_exception_with_syndrome);
+    la_jirl(ra_ir2_opnd, temp, 0);
+
+    s->base->is_jmp = DISAS_NORETURN;
+
+    free_alloc_gpr(temp);
+    return;
+}
+
+static void lata_unallocated_encoding(DisasContext* s)
+{
+    lata_gen_exception_with_syndrome(s, EXCP_UDEF, syn_uncategorized());
+}
+
+static bool trans_EXCP_ILLEGAL(DisasContext *s)
+{
+    lata_gen_exception_with_syndrome(s, EXCP_UDEF, syn_illegalstate());
+    return true;
+}
+
+static bool trans_EXCP_BTI(DisasContext *s)
+{
+    lata_gen_exception_with_syndrome(s, EXCP_UDEF, syn_btitrap(s->btype));
+    return true;
 }
 
 #ifdef CONFIG_LATA_TU
@@ -230,36 +283,6 @@ void lata_emit_tu_unlink_stub(uint64_t guest_pc)
     la_b(ir2_opnd_addr);
 }
 #endif
-
-static void lata_unallocated_encoding(DisasContext* s)
-{
-    if (clearGprHigh) {
-        for (int i = 0; i < 32; ++i) {
-            if (arm_la_map[i] >= 0) {
-                clear_gpr_high_for_boundary(i);
-            }
-        }
-    }
-
-    IR2_OPND temp = ra_alloc_itemp();
-
-    li_d(temp, s->pc_curr);
-    la_st_d(temp, env_ir2_opnd, env_offset_pc());
-    lata_gen_call_helper_prologue(tcg_ctx);
-
-    // CPUARMState *env, uint32_t excp, uint32_t syndrome
-    la_mov64(a0_ir2_opnd, env_ir2_opnd);
-    li_d(a1_ir2_opnd, EXCP_UDEF);
-    li_d(a2_ir2_opnd, syn_uncategorized());
-
-    li_d(temp, (uint64_t)helper_exception_with_syndrome);
-    la_jirl(ra_ir2_opnd, temp, 0);
-
-    s->base->is_jmp = DISAS_NORETURN;
-
-    free_alloc_gpr(temp);
-    return;
-}
 
 static void lata_gen_runtime_trace(DisasContext *s)
 {
@@ -309,6 +332,39 @@ static void lata_clean_data_tbi(DisasContext* s, IR2_OPND* dst, IR2_OPND* src, i
     } else {
         /* lata only support user-mode, we don't need Sign-extend */
         la_bstrpick_d(*dst, *src, 56, 0);
+    }
+}
+
+static void lata_clean_pc_tbi(DisasContext *s, IR2_OPND dst, IR2_OPND src)
+{
+    int tbi = s->tbii;
+
+    if (tbi == 0) {
+        la_mov64(dst, src);
+    } else if (!regime_has_2_ranges(s->mmu_idx)) {
+        la_bstrpick_d(dst, src, 55, 0);
+    } else {
+        IR2_OPND clean = ra_alloc_itemp();
+
+        /* Match QEMU gen_top_byte_ignore(): EL0/EL1 PC tags are selected
+         * by bit 55, and the cleaned address is sign-extended from bit 55. */
+        la_slli_d(clean, src, 8);
+        la_srai_d(clean, clean, 8);
+
+        switch (tbi) {
+        case 1:
+            la_and(dst, clean, src);
+            break;
+        case 2:
+            la_or(dst, clean, src);
+            break;
+        case 3:
+            la_mov64(dst, clean);
+            break;
+        default:
+            g_assert_not_reached();
+        }
+        free_alloc_gpr(clean);
     }
 }
 
@@ -486,18 +542,13 @@ static void lata_helper_addl_saturate_s32(DisasContext* ctx, IR2_OPND vreg_d, IR
     free_alloc_gpr(temp);
 }
 
-static void gen_goto_tb_indirect_kind(DisasContext* s, uint32_t rn,
-                                      LataFAMKind fam_kind)
-{
-    IR2_OPND reg_n = alloc_gpr_src(rn);
-
 #ifdef CONFIG_LATA_PROFILE
 #define LATA_FAM_COUNTER_ENABLED() \
     (option_lata_fam_stats || indirect_jmp_opt_profile)
 #else
 #define LATA_FAM_COUNTER_ENABLED() (option_lata_fam_stats)
 #endif
-#define LATA_FAM_PROFILE_INC(tmp, kind, base_offset) do {                 \
+#define LATA_FAM_PROFILE_INC_INDEXED(tmp, kind, base_offset) do {         \
     if (LATA_FAM_COUNTER_ENABLED()) {                                     \
         la_ld_d((tmp), env_ir2_opnd,                                      \
                 (base_offset) + sizeof(uint64_t) * (kind));               \
@@ -506,79 +557,329 @@ static void gen_goto_tb_indirect_kind(DisasContext* s, uint32_t rn,
                 (base_offset) + sizeof(uint64_t) * (kind));               \
     }                                                                     \
 } while (0)
+#define LATA_FAM_PROFILE_INC_SCALAR(tmp, base_offset) do {                \
+    if (LATA_FAM_COUNTER_ENABLED()) {                                     \
+        la_ld_d((tmp), env_ir2_opnd, (base_offset));                      \
+        la_addi_d((tmp), (tmp), 1);                                       \
+        la_st_d((tmp), env_ir2_opnd, (base_offset));                      \
+    }                                                                     \
+} while (0)
 #define LATA_FAM_PROFILE_LOOKUP(tmp, kind) do {                           \
-    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(fam_lookup_count));     \
-    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(jr_cnt));              \
+    LATA_FAM_PROFILE_INC_INDEXED((tmp), (kind),                           \
+                                 env_offset(fam_lookup_count));           \
+    LATA_FAM_PROFILE_INC_SCALAR((tmp), env_offset(jr_cnt));               \
 } while (0)
 #define LATA_FAM_PROFILE_HIT(tmp, kind) do {                              \
-    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(fam_hit_count));        \
-    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(jr_hit));              \
+    LATA_FAM_PROFILE_INC_INDEXED((tmp), (kind),                           \
+                                 env_offset(fam_hit_count));              \
+    LATA_FAM_PROFILE_INC_SCALAR((tmp), env_offset(jr_hit));               \
 } while (0)
 #define LATA_FAM_PROFILE_MISS(tmp, kind)                                  \
-    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(fam_miss_count))
+    LATA_FAM_PROFILE_INC_INDEXED((tmp), (kind), env_offset(fam_miss_count))
 #define LATA_FAM_PROFILE_RANGE_MISS(tmp, kind)                            \
-    LATA_FAM_PROFILE_INC((tmp), (kind), env_offset(fam_range_miss_count))
+    LATA_FAM_PROFILE_INC_INDEXED((tmp), (kind),                           \
+                                 env_offset(fam_range_miss_count))
+#define LATA_FAM_PROFILE_MISS_REASON(tmp, kind, base_offset)              \
+    LATA_FAM_PROFILE_INC_INDEXED((tmp), (kind), (base_offset))
 
+static bool lata_fam_cflags_supported(uint32_t cflags)
+{
+    return !(cflags & (CF_COUNT_MASK | CF_INVALID | CF_NO_GOTO_TB |
+                       CF_NO_GOTO_PTR | CF_SINGLE_STEP | CF_LAST_IO |
+                       CF_MEMI_ONLY | CF_USE_ICOUNT | CF_NOIRQ | CF_PCREL));
+}
+
+static uint64_t lata_fam_cs_base_with_btype(TranslationBlock *tb, int btype)
+{
+    CPUARMTBFlags flags = arm_tbflags_from_tb(tb);
+
+    DP_TBFLAG_A64(flags, BTYPE, btype);
+    return flags.flags2;
+}
+
+static uint64_t lata_fam_expected_indirect_cs_base(DisasContext *s,
+                                                  LataFAMKind fam_kind,
+                                                  uint32_t rn)
+{
+    TranslationBlock *tb = s->base->tb;
+
+    switch (fam_kind) {
+    case LATA_FAM_KIND_BR:
+        if (dc_isar_feature(aa64_bti, s)) {
+            int btype = rn == 16 || rn == 17 || !s->guarded_page ? 1 : 3;
+
+            return lata_fam_cs_base_with_btype(tb, btype);
+        }
+        return lata_fam_cs_base_with_btype(tb, 0);
+    case LATA_FAM_KIND_BLR:
+        return dc_isar_feature(aa64_bti, s) ?
+            lata_fam_cs_base_with_btype(tb, 2) :
+            lata_fam_cs_base_with_btype(tb, 0);
+    case LATA_FAM_KIND_RET_X30:
+    case LATA_FAM_KIND_RET_XN:
+        /*
+         * RET does not set BTYPE.  If this is not the first instruction in a
+         * BTYPE-entered TB, earlier non-branch instructions have already reset
+         * it to zero.
+         */
+        return s->pc_curr == tb->pc ? tb->cs_base :
+            lata_fam_cs_base_with_btype(tb, 0);
+    default:
+        return tb->cs_base;
+    }
+}
+
+static TranslationBlock *lata_lookup_direct_branch_tb(DisasContext *s,
+                                                      int64_t diff)
+{
 #ifdef CONFIG_LATA_INDIRECT_JMP
+    TranslationBlock *tb = s->base->tb;
+    target_ulong guest_dest = s->pc_curr + diff;
+    uint64_t cs_base = lata_fam_cs_base_with_btype(tb, 0);
 
-    IR2_OPND guest_pc = ra_alloc_itemp();
-    IR2_OPND host_pc = ra_alloc_itemp();
-    IR2_OPND exit = ir2_opnd_new_type(IR2_OPND_LABEL);
-
-    if (option_fam_jmp_cache > 0) {
-        IR2_OPND fallback = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND miss = ir2_opnd_new_type(IR2_OPND_LABEL);
-
-        LATA_FAM_PROFILE_LOOKUP(guest_pc, fam_kind);
-        li_d(guest_pc, current_cpu->env_ptr->mapping_range[0]);
-        la_bltu(reg_n, guest_pc, fallback);
-        li_d(guest_pc, current_cpu->env_ptr->mapping_range[1]);
-        la_bgeu(reg_n, guest_pc, fallback);
-        li_d(host_pc, (uint64_t)(current_cpu->env_ptr->pc_map_cache));
-        la_alsl_d(host_pc, reg_n, host_pc, 2);
-        la_ld_d(host_pc, host_pc, 0);
-        la_beqz(host_pc, miss);
-        LATA_FAM_PROFILE_HIT(guest_pc, fam_kind);
-        la_jirl(zero_ir2_opnd, host_pc, 0);
-        la_label(fallback);
-        LATA_FAM_PROFILE_RANGE_MISS(guest_pc, fam_kind);
-        la_b(exit);
-        la_label(miss);
-        LATA_FAM_PROFILE_MISS(guest_pc, fam_kind);
-        la_label(exit);
-        la_st_d(reg_n, env_ir2_opnd, env_offset_pc());
-        lata_gen_exit_tb_ret_0(s);
-        return;
+    if (!tb || option_fam_jmp_cache < 0 ||
+        !lata_fam_cflags_supported(tb_cflags(tb)) ||
+        qemu_loglevel_mask(CPU_LOG_TB_NOCHAIN)) {
+        return NULL;
     }
 
-    if (option_fam_jmp_cache < 0) {
-        goto indirect_fallback;
-    }
-
-    LATA_FAM_PROFILE_LOOKUP(guest_pc, fam_kind);
-
-    la_bstrpick_d(guest_pc, reg_n, LATA_PC_LOW_BIT + TB_JMP_CACHE_BITS - 1, LATA_PC_LOW_BIT);
-    li_d(host_pc, (uint64_t)(current_cpu->env_ptr->pc_map_cache));
-    la_alsl_d(host_pc, guest_pc, host_pc, 3);
-    la_ld_d(guest_pc, host_pc, 0); // guest pc
-    la_ld_d(host_pc, host_pc, 8);  // host pc
-    la_bne(reg_n, guest_pc, exit);
-
-    LATA_FAM_PROFILE_HIT(guest_pc, fam_kind);
-
-    la_jirl(zero_ir2_opnd, host_pc, 0);
-    la_label(exit);
-
-    free_alloc_gpr(guest_pc);
-    free_alloc_gpr(host_pc);
+    return lata_fam_lookup_tb(current_cpu->env_ptr, guest_dest, cs_base,
+                              tb->flags, tb_cflags(tb));
+#else
+    return NULL;
 #endif
+}
 
-indirect_fallback:
-    la_st_d(reg_n, env_ir2_opnd, env_offset_pc());
+static void lata_emit_fam_keyed_lookup(DisasContext *s, IR2_OPND target_pc,
+                                       LataFAMKind fam_kind,
+                                       uint64_t expected_cs_base)
+{
+#ifdef CONFIG_LATA_INDIRECT_JMP
+    TranslationBlock *tb = s->base->tb;
+    IR2_OPND miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND unsupported_miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND empty_miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND key_miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND invalid_miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND cache = ra_alloc_itemp();
+    IR2_OPND entry = ra_alloc_itemp();
+    IR2_OPND tb_ptr = ra_alloc_itemp();
+    IR2_OPND scratch = ra_alloc_itemp();
+    IR2_OPND cpu_ptr = ra_alloc_itemp();
 
-    /* do not link, but context_switch_native_to_bt_ret_0 will do this */
+    LATA_FAM_PROFILE_LOOKUP(scratch, fam_kind);
+
+    if (option_fam_jmp_cache < 0 ||
+        !lata_fam_cflags_supported(tb_cflags(tb))) {
+        la_b(unsupported_miss);
+    } else {
+        li_d(cpu_ptr, env_offset(lata_cpu_state));
+        la_ldx_d(cpu_ptr, env_ir2_opnd, cpu_ptr);
+        la_ld_wu(scratch, cpu_ptr, offsetof(CPUState, cflags_next_tb));
+        li_d(entry, UINT32_MAX);
+        la_bne(scratch, entry, unsupported_miss);
+
+        li_d(cache, env_offset(lata_fam_cache));
+        la_ldx_d(cache, env_ir2_opnd, cache);
+        la_beqz(cache, empty_miss);
+
+        la_srli_d(entry, target_pc, TB_JMP_CACHE_BITS);
+        la_xor(entry, target_pc, entry);
+        la_bstrpick_d(entry, entry, TB_JMP_CACHE_BITS - 1, 0);
+        la_slli_d(entry, entry, 5);
+        la_add_d(entry, entry, cache);
+        la_addi_d(entry, entry, offsetof(LataFAMCache, entries));
+
+        la_ld_d(scratch, entry, offsetof(LataFAMEntry, pc));
+        la_bne(scratch, target_pc, key_miss);
+        li_d(scratch, expected_cs_base);
+        la_ld_d(cache, entry, offsetof(LataFAMEntry, cs_base));
+        la_bne(cache, scratch, key_miss);
+        li_d(scratch, tb->flags);
+        la_ld_wu(cache, entry, offsetof(LataFAMEntry, flags));
+        la_bne(cache, scratch, key_miss);
+        li_d(scratch, tb_cflags(tb) & ~CF_INVALID);
+        la_ld_wu(cache, entry, offsetof(LataFAMEntry, cflags));
+        la_bne(cache, scratch, key_miss);
+
+        la_ld_d(tb_ptr, entry, offsetof(LataFAMEntry, tb));
+        la_beqz(tb_ptr, empty_miss);
+
+        la_ld_d(scratch, tb_ptr, offsetof(TranslationBlock, pc));
+        la_bne(scratch, target_pc, key_miss);
+        li_d(scratch, expected_cs_base);
+        la_ld_d(cache, tb_ptr, offsetof(TranslationBlock, cs_base));
+        la_bne(cache, scratch, key_miss);
+        li_d(scratch, tb->flags);
+        la_ld_wu(cache, tb_ptr, offsetof(TranslationBlock, flags));
+        la_bne(cache, scratch, key_miss);
+        la_ld_wu(cache, tb_ptr, offsetof(TranslationBlock, cflags));
+        la_bstrpick_w(scratch, cache, 18, 18);
+        la_bnez(scratch, invalid_miss);
+        la_bstrins_d(cache, zero_ir2_opnd, 18, 18);
+        li_d(scratch, tb_cflags(tb) & ~CF_INVALID);
+        la_bne(cache, scratch, key_miss);
+
+        la_st_d(target_pc, env_ir2_opnd, env_offset_pc());
+        la_ld_d(tb_ptr, tb_ptr,
+                offsetof(TranslationBlock, tc) + offsetof(struct tb_tc, ptr));
+        la_beqz(tb_ptr, invalid_miss);
+        LATA_FAM_PROFILE_HIT(scratch, fam_kind);
+        la_jirl(zero_ir2_opnd, tb_ptr, 0);
+    }
+
+    la_label(unsupported_miss);
+    LATA_FAM_PROFILE_MISS_REASON(
+        scratch, fam_kind, env_offset(fam_unsupported_miss_count));
+    la_b(miss);
+
+    la_label(empty_miss);
+    LATA_FAM_PROFILE_MISS_REASON(
+        scratch, fam_kind, env_offset(fam_empty_miss_count));
+    la_b(miss);
+
+    la_label(key_miss);
+    LATA_FAM_PROFILE_MISS_REASON(
+        scratch, fam_kind, env_offset(fam_key_miss_count));
+    la_b(miss);
+
+    la_label(invalid_miss);
+    LATA_FAM_PROFILE_MISS_REASON(
+        scratch, fam_kind, env_offset(fam_invalid_miss_count));
+    la_b(miss);
+
+    la_label(miss);
+    LATA_FAM_PROFILE_MISS(scratch, fam_kind);
+
+    free_alloc_gpr(cpu_ptr);
+    free_alloc_gpr(scratch);
+    free_alloc_gpr(tb_ptr);
+    free_alloc_gpr(entry);
+    free_alloc_gpr(cache);
+#endif
+}
+
+static void lata_emit_fam_fast_lookup(DisasContext *s, IR2_OPND target_pc,
+                                      LataFAMKind fam_kind,
+                                      uint64_t expected_cs_base)
+{
+#ifdef CONFIG_LATA_INDIRECT_JMP
+    TranslationBlock *tb = s->base->tb;
+    IR2_OPND miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND unsupported_miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND empty_miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND key_miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND invalid_miss = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND entry = ra_alloc_itemp();
+    IR2_OPND host_ptr = ra_alloc_itemp();
+    IR2_OPND scratch = ra_alloc_itemp();
+    IR2_OPND cpu_ptr = ra_alloc_itemp();
+
+    LATA_FAM_PROFILE_LOOKUP(scratch, fam_kind);
+
+    if (option_fam_jmp_cache <= 0 ||
+        !lata_fam_cflags_supported(tb_cflags(tb))) {
+        la_b(unsupported_miss);
+    } else {
+        li_d(cpu_ptr, env_offset(lata_cpu_state));
+        la_ldx_d(cpu_ptr, env_ir2_opnd, cpu_ptr);
+        la_ld_wu(scratch, cpu_ptr, offsetof(CPUState, cflags_next_tb));
+        li_d(entry, UINT32_MAX);
+        la_bne(scratch, entry, unsupported_miss);
+
+        li_d(entry, env_offset(lata_fam_cache));
+        la_ldx_d(entry, env_ir2_opnd, entry);
+        la_beqz(entry, empty_miss);
+
+        /*
+         * Fast FAM keeps the LATX-style cheap hit path: one fixed-size hash
+         * probe, a complete AArch64 TB-key comparison, then a direct jump to
+         * the cached host entry.  The saved TB pointer is used by invalidation,
+         * not by the hot generated-code hit path.
+         */
+        la_srli_d(scratch, target_pc, TB_JMP_CACHE_BITS);
+        la_xor(scratch, target_pc, scratch);
+        la_bstrpick_d(scratch, scratch, TB_JMP_CACHE_BITS - 1, 0);
+        la_slli_d(scratch, scratch, 5);
+        la_add_d(entry, entry, scratch);
+        la_addi_d(entry, entry, offsetof(LataFAMCache, entries));
+
+        la_ld_d(host_ptr, entry, offsetof(LataFAMEntry, pc));
+        la_bne(host_ptr, target_pc, key_miss);
+
+        li_d(scratch, expected_cs_base);
+        la_ld_d(cpu_ptr, entry, offsetof(LataFAMEntry, cs_base));
+        la_bne(cpu_ptr, scratch, key_miss);
+
+        li_d(scratch, (((uint64_t)(tb_cflags(tb) & ~CF_INVALID)) << 32) |
+              tb->flags);
+        la_ld_d(cpu_ptr, entry, offsetof(LataFAMEntry, flags_cflags));
+        la_bne(cpu_ptr, scratch, key_miss);
+
+        la_ld_d(host_ptr, entry, offsetof(LataFAMEntry, host_ptr));
+        la_beqz(host_ptr, invalid_miss);
+        LATA_FAM_PROFILE_HIT(scratch, fam_kind);
+        la_jirl(zero_ir2_opnd, host_ptr, 0);
+    }
+
+    la_label(unsupported_miss);
+    LATA_FAM_PROFILE_MISS_REASON(
+        scratch, fam_kind, env_offset(fam_unsupported_miss_count));
+    la_b(miss);
+
+    la_label(empty_miss);
+    LATA_FAM_PROFILE_MISS_REASON(
+        scratch, fam_kind, env_offset(fam_empty_miss_count));
+    la_b(miss);
+
+    la_label(key_miss);
+    LATA_FAM_PROFILE_MISS_REASON(
+        scratch, fam_kind, env_offset(fam_key_miss_count));
+    la_b(miss);
+
+    la_label(invalid_miss);
+    LATA_FAM_PROFILE_MISS_REASON(
+        scratch, fam_kind, env_offset(fam_invalid_miss_count));
+    la_b(miss);
+
+    la_label(miss);
+    LATA_FAM_PROFILE_MISS(scratch, fam_kind);
+
+    free_alloc_gpr(cpu_ptr);
+    free_alloc_gpr(scratch);
+    free_alloc_gpr(host_ptr);
+    free_alloc_gpr(entry);
+#endif
+}
+
+static void lata_emit_fam_lookup(DisasContext *s, IR2_OPND target_pc,
+                                 LataFAMKind fam_kind,
+                                 uint64_t expected_cs_base)
+{
+#ifdef CONFIG_LATA_INDIRECT_JMP
+    if (option_fam_jmp_cache > 0) {
+        lata_emit_fam_fast_lookup(s, target_pc, fam_kind, expected_cs_base);
+    } else {
+        lata_emit_fam_keyed_lookup(s, target_pc, fam_kind, expected_cs_base);
+    }
+#endif
+}
+
+static void gen_goto_tb_indirect_kind(DisasContext* s, uint32_t rn,
+                                      LataFAMKind fam_kind)
+{
+    IR2_OPND reg_n = alloc_gpr_src(rn);
+    IR2_OPND target_pc = ra_alloc_itemp();
+    uint64_t expected_cs_base =
+        lata_fam_expected_indirect_cs_base(s, fam_kind, rn);
+
+    lata_clean_pc_tbi(s, target_pc, reg_n);
+    lata_emit_fam_lookup(s, target_pc, fam_kind, expected_cs_base);
+
+    la_st_d(target_pc, env_ir2_opnd, env_offset_pc());
     lata_gen_exit_tb_ret_0(s);
 
+    free_alloc_gpr(target_pc);
     free_alloc_gpr(reg_n);
 }
 
@@ -597,67 +898,17 @@ static void gen_goto_tb_indirect_boundary(DisasContext *s, uint32_t rn,
 static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n,
                                      LataFAMKind fam_kind)
 {
+    IR2_OPND target_pc = ra_alloc_itemp();
+    uint64_t expected_cs_base =
+        lata_fam_expected_indirect_cs_base(s, fam_kind, 0);
 
-#ifdef CONFIG_LATA_INDIRECT_JMP
-    IR2_OPND guest_pc = ra_alloc_itemp();
-    IR2_OPND host_pc = ra_alloc_itemp();
-    IR2_OPND exit = ir2_opnd_new_type(IR2_OPND_LABEL);
+    lata_clean_pc_tbi(s, target_pc, reg_n);
+    lata_emit_fam_lookup(s, target_pc, fam_kind, expected_cs_base);
 
-    if (option_fam_jmp_cache > 0) {
-        IR2_OPND fallback = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND miss = ir2_opnd_new_type(IR2_OPND_LABEL);
-
-        LATA_FAM_PROFILE_LOOKUP(guest_pc, fam_kind);
-        li_d(guest_pc, current_cpu->env_ptr->mapping_range[0]);
-        la_bltu(reg_n, guest_pc, fallback);
-        li_d(guest_pc, current_cpu->env_ptr->mapping_range[1]);
-        la_bgeu(reg_n, guest_pc, fallback);
-        li_d(host_pc, (uint64_t)(current_cpu->env_ptr->pc_map_cache));
-        la_alsl_d(host_pc, reg_n, host_pc, 2);
-        la_ld_d(host_pc, host_pc, 0);
-        la_beqz(host_pc, miss);
-        LATA_FAM_PROFILE_HIT(guest_pc, fam_kind);
-        la_jirl(zero_ir2_opnd, host_pc, 0);
-        la_label(fallback);
-        LATA_FAM_PROFILE_RANGE_MISS(guest_pc, fam_kind);
-        la_b(exit);
-        la_label(miss);
-        LATA_FAM_PROFILE_MISS(guest_pc, fam_kind);
-        la_label(exit);
-        la_st_d(reg_n, env_ir2_opnd, env_offset_pc());
-        lata_gen_exit_tb_ret_0(s);
-        return;
-    }
-
-    if (option_fam_jmp_cache < 0) {
-        goto indirect_blr_fallback;
-    }
-
-    LATA_FAM_PROFILE_LOOKUP(guest_pc, fam_kind);
-
-    la_bstrpick_d(guest_pc, reg_n, LATA_PC_LOW_BIT + TB_JMP_CACHE_BITS - 1,
-        LATA_PC_LOW_BIT);
-    li_d(host_pc, (uint64_t)(current_cpu->env_ptr->pc_map_cache));
-    la_alsl_d(host_pc, guest_pc, host_pc, 3);
-    la_ld_d(guest_pc, host_pc, 0); // guest pc
-    la_ld_d(host_pc, host_pc, 8);  // host pc
-    la_bne(reg_n, guest_pc, exit);
-
-    LATA_FAM_PROFILE_HIT(guest_pc, fam_kind);
-
-    la_jirl(zero_ir2_opnd, host_pc, 0);
-    la_label(exit);
-
-    free_alloc_gpr(guest_pc);
-    free_alloc_gpr(host_pc);
-#endif
-
-indirect_blr_fallback:
-    la_st_d(reg_n, env_ir2_opnd, env_offset_pc());
-
-    /* do not link, but context_switch_native_to_bt_ret_0 will do this */
+    la_st_d(target_pc, env_ir2_opnd, env_offset_pc());
     lata_gen_exit_tb_ret_0(s);
 
+    free_alloc_gpr(target_pc);
     free_alloc_gpr(reg_n);
 }
 
@@ -668,12 +919,84 @@ static void gen_goto_tb_indirect_blr_boundary(DisasContext *s,
     gen_goto_tb_indirect_blr(s, reg_n, LATA_FAM_KIND_BLR);
 }
 
-#undef LATA_FAM_PROFILE_INC
+#undef LATA_FAM_PROFILE_INC_INDEXED
+#undef LATA_FAM_PROFILE_INC_SCALAR
 #undef LATA_FAM_COUNTER_ENABLED
 #undef LATA_FAM_PROFILE_LOOKUP
 #undef LATA_FAM_PROFILE_HIT
 #undef LATA_FAM_PROFILE_MISS
 #undef LATA_FAM_PROFILE_RANGE_MISS
+#undef LATA_FAM_PROFILE_MISS_REASON
+
+static void lata_set_btype(DisasContext *s, int val)
+{
+    if (s->btype == val) {
+        return;
+    }
+    li_d(a0_ir2_opnd, val);
+    la_st_w(a0_ir2_opnd, env_ir2_opnd, env_offset(btype));
+    s->btype = -1;
+}
+
+static void lata_reset_btype(DisasContext *s)
+{
+    if (s->btype != 0) {
+        li_d(a0_ir2_opnd, 0);
+        la_st_w(a0_ir2_opnd, env_ir2_opnd, env_offset(btype));
+        s->btype = 0;
+    }
+}
+
+static void lata_set_btype_for_br(DisasContext *s, int rn)
+{
+    if (dc_isar_feature(aa64_bti, s)) {
+        lata_set_btype(s, rn == 16 || rn == 17 || !s->guarded_page ? 1 : 3);
+    }
+}
+
+static void lata_set_btype_for_blr(DisasContext *s)
+{
+    if (dc_isar_feature(aa64_bti, s)) {
+        lata_set_btype(s, 2);
+    }
+}
+
+static bool lata_is_guarded_page(CPUARMState *env, DisasContext *s)
+{
+#ifdef CONFIG_USER_ONLY
+    return (page_get_flags(s->base->pc_first) & PAGE_BTI) != 0;
+#else
+    (void)env;
+    (void)s;
+    return false;
+#endif
+}
+
+static bool lata_btype_destination_ok(uint32_t insn, bool bt, int btype)
+{
+    if ((insn & 0xfffff01fu) == 0xd503201fu) {
+        switch (extract32(insn, 5, 7)) {
+        case 0x19: /* PACIASP */
+        case 0x1b: /* PACIBSP */
+            return !bt || btype != 3;
+        case 0x20: /* BTI */
+            return false;
+        case 0x22: /* BTI c */
+            return btype != 3;
+        case 0x24: /* BTI j */
+            return btype != 2;
+        case 0x26: /* BTI jc */
+            return true;
+        }
+    } else {
+        switch (insn & 0xffe0001fu) {
+        case 0xd4200000u: /* BRK */
+        case 0xd4400000u: /* HLT */
+            return true;
+        }
+    }
+    return false;
+}
 
 static inline void li_arm_addr(IR2_OPND opnd2, int64_t value)
 {
@@ -718,29 +1041,14 @@ static void gen_goto_tb(DisasContext* s, int n, int64_t diff)
     }
 #endif
 
-    if (option_fam_jmp_cache > 0) {
-        uint64_t guest_dest = s->pc_curr + diff;
-        CPUARMState *env = current_cpu->env_ptr;
-
-        if (guest_dest >= env->mapping_range[0] && guest_dest < env->mapping_range[1]) {
-            uint64_t* pc_map_cache_ptr = (uint64_t*)env->pc_map_cache;
-            uint64_t host_dest = pc_map_cache_ptr[guest_dest];
-
-            if (host_dest) {
-                uint64_t curr_ins_pos = (unsigned long)tb->tc.ptr + (lsenv->tr_data->real_ir2_inst_num << 2);
-                uint64_t exit_offset = host_dest - curr_ins_pos;
-
-                ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, exit_offset >> 2);
-                la_b(ir2_opnd_addr);
-                return;
-            }
-        }
-    }
+    tb->lata_prelink_tb[n] = lata_lookup_direct_branch_tb(s, diff);
 
     la_label(goto_label);
     tb->jmp_reset_offset[n] = ir2_opnd_label_id(&goto_label);
-    ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, 1);
+    ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, B_STUB_SIZE >> 2);
     la_b(ir2_opnd_addr); // nop
+    la_ld_d(a0_ir2_opnd, a0_ir2_opnd, 0);
+    la_jirl(zero_ir2_opnd, a0_ir2_opnd, 0);
 
     lata_gen_a64_update_pc(s, diff);
 
@@ -755,6 +1063,7 @@ static void gen_goto_tb(DisasContext* s, int n, int64_t diff)
 
     ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, exit_offset >> 2);
     la_b(ir2_opnd_addr);
+    set_base_isjump(s);
 }
 
 #ifdef CONFIG_LATA_TU
@@ -1019,6 +1328,7 @@ static bool trans_B(DisasContext* s)
         }
     }
 
+    lata_reset_btype(s);
     gen_goto_tb(s, 1, a->imm);
     // s->base->is_jmp = DISAS_NORETURN;
 
@@ -1040,6 +1350,7 @@ static bool trans_BL(DisasContext* s)
     li_d(x30, s->base->pc_next); /* BL setting X30 to PC+4 */
     store_gpr_dst(30, x30);
 
+    lata_reset_btype(s);
     gen_goto_tb(s, 1, a->imm);
     // s->base->is_jmp = DISAS_NORETURN;
 
@@ -1060,6 +1371,8 @@ static bool trans_CBZ(DisasContext* s)
     IR2_OPND reg_t = alloc_gpr_src(a->rt);
     IR2_OPND label = ir2_opnd_new_type(IR2_OPND_LABEL);
     IR2_OPND temp;
+
+    lata_reset_btype(s);
 
     if (a->sf) {
         if (a->nz) { // CBNZ
@@ -1102,6 +1415,8 @@ static bool trans_TBZ(DisasContext* s)
     IR2_OPND label = ir2_opnd_new_type(IR2_OPND_LABEL);
     IR2_OPND temp = ra_alloc_itemp();
 
+    lata_reset_btype(s);
+
     la_bstrpick_d(temp, reg_t, a->bitpos, a->bitpos);
     if (a->nz) { // TBNZ
         la_bnez(temp, label);
@@ -1128,6 +1443,8 @@ static bool trans_B_cond(DisasContext* s)
             }
         }
     }
+
+    lata_reset_btype(s);
 
     if (a->cond < 0x0e) {
         /* genuinely conditional branches */
@@ -1187,6 +1504,7 @@ static bool trans_BR(DisasContext* s)
             }
         }
     }
+    lata_set_btype_for_br(s, a->rn);
     gen_goto_tb_indirect_boundary(s, a->rn, LATA_TU_BOUNDARY_BR);
     // s->base->is_jmp = DISAS_NORETURN;
 
@@ -1218,6 +1536,7 @@ static bool trans_BLR(DisasContext* s)
     li_d(x30, s->base->pc_next); /* BL setting X30 to PC+4 */
     store_gpr_dst(30, x30);
 
+    lata_set_btype_for_blr(s);
     gen_goto_tb_indirect_blr_boundary(s, reg_n);
     // s->base->is_jmp = DISAS_NORETURN;
 
@@ -1425,7 +1744,12 @@ static bool trans_DSB_DMB(DisasContext* s)
     return true;
 }
 
-static bool trans_ISB(DisasContext* s) { return true; }
+static bool trans_ISB(DisasContext* s)
+{
+    lata_reset_btype(s);
+    gen_goto_tb(s, 0, 4);
+    return true;
+}
 
 static bool trans_SB(DisasContext* s)
 {
@@ -1436,7 +1760,7 @@ static bool trans_SB(DisasContext* s)
      * TODO: There is no speculation barrier opcode for TCG;
      * MB and end the TB instead.
      */
-    tcg_gen_mb(TCG_MO_ALL | TCG_BAR_SC);
+    la_dbar(0);
     gen_goto_tb(s, 0, 4);
     return true;
 }
@@ -21191,6 +21515,8 @@ static bool (*translate_functions[])(DisasContext*) = {
     TRANS_FUNC_GEN(AARCH64_A64_YIELD, YIELD),
     TRANS_DISAS_FUNC_GEN(AARCH64_A64_DATA_PROC_REG, reg),
     TRANS_DISAS_FUNC_GEN(AARCH64_A64_DATA_PROC_SIMD_FD, simd_fp),
+    TRANS_FUNC_GEN(AARCH64_A64_EXCP_ILLEGAL, EXCP_ILLEGAL),
+    TRANS_FUNC_GEN(AARCH64_A64_EXCP_BTI, EXCP_BTI),
 };
 
 static void aarch64_tr_init_disas_context(DisasContext* dc,
@@ -21232,6 +21558,7 @@ static void aarch64_tr_init_disas_context(DisasContext* dc,
     dc->pauth_active = EX_TBFLAG_A64(tb_flags, PAUTH_ACTIVE);
     dc->bt = EX_TBFLAG_A64(tb_flags, BT);
     dc->btype = EX_TBFLAG_A64(tb_flags, BTYPE);
+    dc->guarded_page = false;
     dc->unpriv = EX_TBFLAG_A64(tb_flags, UNPRIV);
     dc->ata = EX_TBFLAG_A64(tb_flags, ATA);
     dc->mte_active[0] = EX_TBFLAG_A64(tb_flags, MTE_ACTIVE);
@@ -21511,9 +21838,8 @@ void target_disasm(struct TranslationBlock* tb, int* max_insns, CPUState* cpu)
     tb->ir1 = get_ir1_list(cpu, tb, pc, *max_insns);
 #ifdef CONFIG_LATA_TU
     if (tb->ir1 && tb->icount) {
-        uint32_t offset = tu_data->ir1_num_in_tu;
-        lsassert(offset + tb->icount <= MAX_TB_IN_TU * TCG_MAX_INSNS);
-        DisasContext *ir1_copy = tu_get_ir1_list(offset);
+        DisasContext *ir1_copy = tu_ir1_alloc(tb->icount);
+
         memcpy(ir1_copy, tb->ir1, sizeof(DisasContext) * tb->icount);
         tb->ir1 = ir1_copy;
         tu_data->ir1_num_in_tu += tb->icount;
@@ -21571,6 +21897,26 @@ void translate_aarch64_insn(DisasContext* s, CPUState* cpu)
     s->insn = insn;
     s->base->pc_next = pc + 4;
 
+    if (s->pstate_il) {
+        s->insn_type = AARCH64_A64_EXCP_ILLEGAL;
+        s->base->is_jmp = DISAS_NORETURN;
+        return;
+    }
+
+    if (dc_isar_feature(aa64_bti, s)) {
+        if (s->base->num_insns == 0) {
+            s->guarded_page = lata_is_guarded_page(env, s);
+            if (s->btype != 0 && s->guarded_page &&
+                !lata_btype_destination_ok(insn, s->bt, s->btype)) {
+                s->insn_type = AARCH64_A64_EXCP_BTI;
+                s->base->is_jmp = DISAS_NORETURN;
+                return;
+            }
+        } else {
+            s->guarded_page = false;
+        }
+    }
+
     s->fp_access_checked = false;
     s->sve_access_checked = false;
 
@@ -21626,6 +21972,7 @@ skip_decode:
 bool tr_ir2_generate(struct TranslationBlock* tb)
 {
     int i;
+    int last_is_jmp = DISAS_NEXT;
 
     int ir1_nr = tb->icount;
     DisasContext* pir1 = (DisasContext*)tb->ir1;
@@ -21646,7 +21993,8 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
         if (i == ir1_nr - 2 && insts_pattern(pir1, pir1 + 1)) {
             tcg_ctx->gen_insn_end_off[i] = (lsenv->tr_data->real_ir2_inst_num) << 2;
             tcg_ctx->gen_insn_data[i * TARGET_INSN_START_WORDS] = pir1->pc_curr;
-            pir1 += 2; // update true pir1 for tb stop check
+            last_is_jmp = DISAS_NORETURN;
+            pir1 += 1; // update true pir1 for tb stop check
             break;
         }
 #endif
@@ -21659,6 +22007,10 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
         if (!trans_success) {
             lsassertm(0, "ir1_translate fail");
         }
+        if (pir1->btype > 0 && pir1->base->is_jmp != DISAS_NORETURN) {
+            lata_reset_btype(pir1);
+        }
+        last_is_jmp = pir1->base->is_jmp;
         lata_df_advance_insn();
 #ifndef CONFIG_LATA_TU
         tcg_ctx->gen_insn_end_off[i] = (lsenv->tr_data->real_ir2_inst_num) << 2;
@@ -21667,21 +22019,20 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
         pir1++;
     }
 
-#ifdef CONFIG_LATA_TU
-    if (tb->isplit) {
-        tb->last_ir1_type = IR1_TYPE_NORMAL;
-        IR2_OPND goto_label = ir2_opnd_new_type(IR2_OPND_LABEL);
-        IR2_OPND ir2_opnd_addr;
-        la_label(goto_label);
-        tb->jmp_reset_offset[0] = ir2_opnd_label_id(&goto_label);
-        ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, 1);
-        la_b(ir2_opnd_addr); // nop
-    }
-#endif
-
     /*tb stop function*/
     pir1--;
-    switch (pir1->base->is_jmp) {
+#ifdef CONFIG_LATA_TU
+    DisasContextBase tail_base = *pir1->base;
+
+    tail_base.tb = tb;
+    tail_base.pc_first = tb->pc;
+    tail_base.pc_next = pir1->pc_curr + 4;
+    tail_base.max_insns = ir1_nr;
+    tail_base.num_insns = ir1_nr;
+    tail_base.is_jmp = last_is_jmp;
+    pir1->base = &tail_base;
+#endif
+    switch (last_is_jmp) {
         case DISAS_NEXT:
         case DISAS_TOO_MANY:
             if (clearGprHigh) {

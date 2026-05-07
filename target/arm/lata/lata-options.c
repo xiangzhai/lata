@@ -6,7 +6,7 @@
 int indirect_jmp_opt_profile;
 #endif
 #ifdef CONFIG_LATA_INDIRECT_JMP
-int option_fam_jmp_cache = -1;
+int option_fam_jmp_cache = 1;
 #else
 int option_fam_jmp_cache;
 #endif
@@ -69,7 +69,7 @@ void lata_options_init(void)
     indirect_jmp_opt_profile = 0;
 #endif
 #ifdef CONFIG_LATA_INDIRECT_JMP
-    option_fam_jmp_cache = -1;
+    option_fam_jmp_cache = 1;
 #else
     option_fam_jmp_cache = 0;
 #endif
@@ -287,6 +287,12 @@ void lata_options_parse_fam_cache(const char *arg)
 {
     if (arg) {
         option_fam_jmp_cache = atoi(arg);
+        if (option_fam_jmp_cache > 1) {
+            option_fam_jmp_cache = 1;
+        }
+        if (option_fam_jmp_cache < -1) {
+            option_fam_jmp_cache = -1;
+        }
     }
 }
 

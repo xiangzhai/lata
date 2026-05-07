@@ -109,8 +109,10 @@ static void pattern_goto_tb(DisasContext *s, int n, int64_t diff)
 
     la_label(goto_label);
     tb->jmp_reset_offset[n] = ir2_opnd_label_id(&goto_label);
-    ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, 1);
+    ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, B_STUB_SIZE >> 2);
     la_b(ir2_opnd_addr); // nop
+    la_ld_d(a0_ir2_opnd, a0_ir2_opnd, 0);
+    la_jirl(zero_ir2_opnd, a0_ir2_opnd, 0);
 
     try_free_itemp(la_a0);  // ensure a0 not held by temp pool
     li_d(a0_ir2_opnd, s->pc_curr + diff + 4);

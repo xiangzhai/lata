@@ -72,6 +72,7 @@
 #include "target/arm/tcg/translate.h"
 #include "target/arm/lata/include/lata-debug.h"
 #include "target/arm/lata/include/dataflow.h"
+#include "target/arm/lata/include/lata.h"
 #include "target/arm/lata/include/translate.h"
 #include "target/arm/lata/include/translate-a64.h"
 #endif
@@ -412,6 +413,8 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
     tb->jmp_reset_offset[1] = TB_JMP_OFFSET_INVALID;
     tb->jmp_insn_offset[0] = TB_JMP_OFFSET_INVALID;
     tb->jmp_insn_offset[1] = TB_JMP_OFFSET_INVALID;
+    tb->lata_prelink_tb[0] = NULL;
+    tb->lata_prelink_tb[1] = NULL;
 #ifdef CONFIG_LATA_INSTS_PATTERN
     tb->nzcv_save[0] = TB_JMP_OFFSET_INVALID;
     tb->nzcv_save[1] = TB_JMP_OFFSET_INVALID;
@@ -637,6 +640,10 @@ TranslationBlock *tb_gen_code(CPUState *cpu,
         tcg_tb_remove(tb);
         return existing_tb;
     }
+#ifdef CONFIG_LATA_INDIRECT_JMP
+    lata_fam_add_tb(env, tb);
+    lata_fam_prelink_tb(tb);
+#endif
     return tb;
 }
 

@@ -41,7 +41,8 @@ void tu_aarch64_optimization(struct TranslationBlock *tb);
 int translate_tb_in_tu(struct TranslationBlock *tb);
 void lata_pre_translate(void** list, int num, CPUState *cpu,
                         uint64_t cs_base, uint32_t flags, uint32_t cflags);
-TranslationBlock *tu_tree_lookup(target_ulong pc);
+TranslationBlock *tu_tree_lookup(target_ulong pc, target_ulong cs_base,
+                                 uint32_t flags, int cflags);
 void solve_tb_overlap(TranslationBlock **tb_list, int max_insns);
 void translate_tu(TranslationBlock **tb_list);
 bool tu_relocat_branch(TranslationBlock * tb, int n);

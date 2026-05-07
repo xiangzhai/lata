@@ -774,6 +774,9 @@ static void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)
 
     CPU_FOREACH(cpu) {
         tcg_flush_jmp_cache(cpu);
+#ifdef CONFIG_LATA
+        lata_fam_clear_all(cpu->env_ptr);
+#endif
     }
 
     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
@@ -901,8 +904,7 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
         CPU_FOREACH(cpu) {
             tcg_flush_jmp_cache(cpu);
 #ifdef CONFIG_LATA
-            lata_fast_jmp_cache_invalidate(cpu->env_ptr, tb->pc,
-                                           (uint64_t)tb->tc.ptr);
+            lata_fam_invalidate_tb(cpu->env_ptr, tb);
 #endif
         }
     } else {
@@ -915,8 +917,7 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
                 qatomic_set(&jc->array[h].tb, NULL);
             }
 #ifdef CONFIG_LATA
-            lata_fast_jmp_cache_invalidate(cpu->env_ptr, tb->pc,
-                                           (uint64_t)tb->tc.ptr);
+            lata_fam_invalidate_tb(cpu->env_ptr, tb);
 #endif
         }
     }

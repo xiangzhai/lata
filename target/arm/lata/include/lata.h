@@ -14,7 +14,38 @@
 #include "tcg/tcg.h"
 //#include "env.h"
 
-#define B_STUB_SIZE 4
+#define B_STUB_SIZE 12
+
+typedef enum LataFAMMode {
+    LATA_FAM_OFF = -1,
+    LATA_FAM_SAFE = 0,
+    LATA_FAM_FAST = 1,
+} LataFAMMode;
+
+struct LataFAMEntry {
+    uint64_t pc;
+    uint64_t cs_base;
+    union {
+        struct {
+            uint32_t flags;
+            uint32_t cflags;
+        };
+        uint64_t flags_cflags;
+    };
+    union {
+        TranslationBlock *tb;
+        void *host_ptr;
+    };
+};
+typedef struct LataFAMEntry LataFAMEntry;
+
+struct LataFAMCache {
+    uint32_t size;
+    uint32_t mask;
+    TranslationBlock **fast_tbs;
+    LataFAMEntry entries[];
+};
+typedef struct LataFAMCache LataFAMCache;
 
 typedef struct TRANSLATION_DATA {
 
@@ -81,10 +112,17 @@ extern uint64_t context_switch_native_to_bt;
 
 int lata_gen_prologue(TCGContext *tcg_ctx);
 int lata_gen_epilogue(TCGContext *tcg_ctx);
-void lata_fast_jmp_cache_init(CPUArchState *env, uint64_t start_code, uint64_t end_code);
-void lata_fast_jmp_cache_add(CPUArchState *env, uint64_t guest_pc, uint64_t host_pc);
-void lata_fast_jmp_cache_invalidate(CPUArchState *env, uint64_t guest_pc,
-                                    uint64_t host_pc);
+bool lata_fam_init(CPUArchState *env);
+void lata_fam_destroy(CPUArchState *env);
+void lata_fam_clear_all(CPUArchState *env);
+void lata_fam_clear_all_cpus(void);
+void lata_fam_clear_page(CPUArchState *env, uint64_t page_addr);
+void lata_fam_add_tb(CPUArchState *env, TranslationBlock *tb);
+void lata_fam_invalidate_tb(CPUArchState *env, TranslationBlock *tb);
+TranslationBlock *lata_fam_lookup_tb(CPUArchState *env, uint64_t pc,
+                                     uint64_t cs_base, uint32_t flags,
+                                     uint32_t cflags);
+void lata_fam_prelink_tb(TranslationBlock *tb);
 
 int tr_ir2_assemble(const void *code_start_addr);
 void label_dispose(void);

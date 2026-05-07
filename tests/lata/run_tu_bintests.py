@@ -426,7 +426,168 @@ _start:
 target:
         add     x0, x19, #42
         ret
-""",
+    """,
+    "fam_collision_overwrite": r"""
+        .text
+        .global _start
+_start:
+        bl      call_a
+        cmp     x19, #11
+        b.ne    fail
+        bl      call_b
+        cmp     x19, #33
+        b.ne    fail
+        bl      call_a
+        cmp     x19, #44
+        b.eq    pass
+        b       fail
+call_a:
+        adrp    x16, target_a
+        add     x16, x16, :lo12:target_a
+        br      x16
+call_b:
+        adrp    x16, target_b
+        add     x16, x16, :lo12:target_b
+        br      x16
+target_a:
+        add     x19, x19, #11
+        ret
+        .org    target_a + 0x40004
+target_b:
+        add     x19, x19, #22
+        ret
+    """,
+    "fam_tu_interior_hit": r"""
+        .text
+        .global _start
+_start:
+        bl      warm_tu
+        bl      enter_interior
+        cmp     x19, #47
+        b.eq    pass
+        b       fail
+warm_tu:
+        mov     x19, #0
+        b       interior_target
+        b       fail
+interior_target:
+        add     x19, x19, #5
+        ret
+enter_interior:
+        adrp    x16, interior_target
+        add     x16, x16, :lo12:interior_target
+        add     x19, x19, #37
+        br      x16
+    """,
+    "fam_invalidate_after_mprotect": r"""
+        .text
+        .global _start
+_start:
+        bl      call_target
+        cmp     x19, #9
+        b.ne    fail
+        adrp    x0, target_page
+        add     x0, x0, :lo12:target_page
+        mov     x1, #4096
+        mov     x2, #5
+        mov     x8, #226
+        svc     #0
+        cbnz    x0, fail
+        adrp    x0, target_page
+        add     x0, x0, :lo12:target_page
+        mov     x1, #4096
+        mov     x2, #7
+        mov     x8, #226
+        svc     #0
+        cbnz    x0, fail
+        adrp    x0, target_page
+        add     x0, x0, :lo12:target_page
+        mov     x1, #4096
+        mov     x2, #5
+        mov     x8, #226
+        svc     #0
+        cbnz    x0, fail
+        bl      call_target
+        cmp     x19, #18
+        b.eq    pass
+        b       fail
+call_target:
+        adrp    x16, target
+        add     x16, x16, :lo12:target
+        br      x16
+        .balign 4096
+target_page:
+target:
+        add     x19, x19, #9
+        ret
+    """,
+    "fam_clone_fresh_cache": r"""
+        .text
+        .global _start
+_start:
+        bl      call_target
+        cmp     x19, #3
+        b.ne    fail
+        adrp    x1, child_stack_top
+        add     x1, x1, :lo12:child_stack_top
+        ldr     x0, =0x50f00
+        mov     x2, #0
+        mov     x3, #0
+        mov     x4, #0
+        mov     x8, #220
+        svc     #0
+        cmp     x0, #0
+        b.eq    child
+        cmp     x0, #0
+        b.lt    fail
+        adrp    x20, child_done
+        add     x20, x20, :lo12:child_done
+1:
+        ldr     w21, [x20]
+        cbz     w21, 1b
+        cmp     w21, #1
+        b.ne    fail
+        bl      call_target
+        cmp     x19, #6
+        b.eq    pass
+        b       fail
+child:
+        mov     x19, #0
+        bl      call_target
+        cmp     x19, #3
+        b.ne    child_fail
+        adrp    x20, child_done
+        add     x20, x20, :lo12:child_done
+        mov     w21, #1
+        str     w21, [x20]
+        mov     x0, #0
+        mov     x8, #93
+        svc     #0
+child_fail:
+        adrp    x20, child_done
+        add     x20, x20, :lo12:child_done
+        mov     w21, #2
+        str     w21, [x20]
+        mov     x0, #1
+        mov     x8, #93
+        svc     #0
+call_target:
+        adrp    x16, target
+        add     x16, x16, :lo12:target
+        br      x16
+target:
+        add     x19, x19, #3
+        ret
+        .data
+        .balign 16
+child_done:
+        .word   0
+        .balign 16
+child_stack:
+        .skip   16384
+child_stack_top:
+        .text
+    """,
     "forced_unlink_direct_edge": r"""
         .text
         .global _start
@@ -548,6 +709,9 @@ def main():
                         help="verify TU dump, TU stats and forced unlink output")
     parser.add_argument("--lata-arg", action="append", default=[],
                         help="extra argument passed to QEMU-LATA; repeatable")
+    parser.add_argument("--fam-modes",
+                        help="comma-separated -lata-fam-cache modes to test, "
+                             "for example -1,0,1")
     parser.add_argument("--require-lata-output", action="append", default=[],
                         help="substring required in LATA stdout/stderr; repeatable")
     parser.add_argument("--keep", action="store_true")
@@ -564,6 +728,19 @@ def main():
     if not selected:
         print("no tests selected", file=sys.stderr)
         return 1
+    if args.fam_modes:
+        lata_runs = []
+        for mode in args.fam_modes.split(","):
+            mode = mode.strip()
+            if not mode:
+                continue
+            lata_runs.append((f"fam={mode}",
+                              args.lata_arg + ["-lata-fam-cache", mode]))
+        if not lata_runs:
+            print("no FAM modes selected", file=sys.stderr)
+            return 1
+    else:
+        lata_runs = [("default", args.lata_arg)]
 
     with tempfile.TemporaryDirectory(prefix="lata-tu-bintest-") as tmp:
         out_dir = Path(tmp)
@@ -572,13 +749,18 @@ def main():
         for name, asm in selected:
             elf = build_test(name, asm, out_dir)
             tcg_ok, tcg = run_guest(args.qemu_tcg, elf, args.timeout)
-            lata_ok, lata = run_guest(args.qemu_lata, elf, args.timeout,
-                                      args.debug_tu, args.lata_arg)
-            if lata_ok and args.require_lata_output:
-                lata_ok = check_required_output(name, lata,
-                                                args.require_lata_output)
-            if lata_ok and args.check_debug_surface:
-                lata_ok = check_debug_surface_output(name, lata)
+            lata_results = []
+            lata_ok = True
+            for label, lata_args in lata_runs:
+                ok, result = run_guest(args.qemu_lata, elf, args.timeout,
+                                       args.debug_tu, lata_args)
+                if ok and args.require_lata_output:
+                    ok = check_required_output(f"{name} {label}", result,
+                                               args.require_lata_output)
+                if ok and args.check_debug_surface:
+                    ok = check_debug_surface_output(f"{name} {label}", result)
+                lata_results.append((label, ok, result))
+                lata_ok = lata_ok and ok
 
             if tcg_ok and lata_ok:
                 print(f"PASS {name}")
@@ -587,7 +769,9 @@ def main():
             failures.append(name)
             print(f"FAIL {name}")
             print(f"  TCG:  rc={tcg.returncode} stdout={tcg.stdout!r} stderr={tcg.stderr[:200]!r}")
-            print(f"  LATA: rc={lata.returncode} stdout={lata.stdout!r} stderr={lata.stderr[:200]!r}")
+            for label, ok, result in lata_results:
+                print(f"  LATA[{label}]: ok={ok} rc={result.returncode} "
+                      f"stdout={result.stdout!r} stderr={result.stderr[:200]!r}")
 
         if args.keep:
             keep_dir = Path("/tmp/lata-tu-bintests")

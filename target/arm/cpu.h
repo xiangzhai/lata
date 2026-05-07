@@ -34,6 +34,10 @@
 #define KVM_HAVE_MCE_INJECTION 1
 #endif
 
+#ifdef CONFIG_LATA
+typedef struct LataFAMCache LataFAMCache;
+#endif
+
 #define EXCP_UDEF            1   /* undefined instruction */
 #define EXCP_SWI             2   /* software interrupt */
 #define EXCP_PREFETCH_ABORT  3
@@ -298,8 +302,12 @@ typedef struct CPUArchState {
     uint64_t fam_hit_count[4];
     uint64_t fam_miss_count[4];
     uint64_t fam_range_miss_count[4];
-    void *pc_map_cache;
-    uint64_t mapping_range[2];
+    uint64_t fam_empty_miss_count[4];
+    uint64_t fam_key_miss_count[4];
+    uint64_t fam_invalid_miss_count[4];
+    uint64_t fam_unsupported_miss_count[4];
+    LataFAMCache *lata_fam_cache;
+    CPUState *lata_cpu_state;
     uint64_t exclusive_memdata;
 #endif
 

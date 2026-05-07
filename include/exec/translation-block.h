@@ -239,6 +239,7 @@ struct TranslationBlock {
 #ifdef CONFIG_LATA
     void *ir1;
     int codesize;
+    TranslationBlock *lata_prelink_tb[2];
 #endif
 #ifdef CONFIG_LATA_TU
     uint64_t target_pc;

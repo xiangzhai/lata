@@ -41,13 +41,25 @@ static void lata_profile_print_fam_stats(CPUArchState *env)
         double fam_ratio = lookups ? (double)hits / lookups : 0.0;
 
         if (option_lata_fam_stats || lookups || env->fam_miss_count[i] ||
-            env->fam_range_miss_count[i]) {
+            env->fam_range_miss_count[i] ||
+            env->fam_empty_miss_count[i] ||
+            env->fam_key_miss_count[i] ||
+            env->fam_invalid_miss_count[i] ||
+            env->fam_unsupported_miss_count[i]) {
             qemu_log("[LATA] FAM %s lookup=%" PRIu64
                      " hit=%" PRIu64 " miss=%" PRIu64
-                     " range_miss=%" PRIu64 " hit_ratio=%f\n",
+                     " range_miss=%" PRIu64
+                     " empty=%" PRIu64 " key=%" PRIu64
+                     " invalid=%" PRIu64 " unsupported=%" PRIu64
+                     " hit_ratio=%f\n",
                      lata_fam_kind_name(i), lookups, hits,
                      env->fam_miss_count[i],
-                     env->fam_range_miss_count[i], fam_ratio);
+                     env->fam_range_miss_count[i],
+                     env->fam_empty_miss_count[i],
+                     env->fam_key_miss_count[i],
+                     env->fam_invalid_miss_count[i],
+                     env->fam_unsupported_miss_count[i],
+                     fam_ratio);
         }
     }
 }
@@ -67,7 +79,9 @@ void lata_debug_print_stats(CPUState *cpu)
 #ifdef CONFIG_LATA_DEBUG
 typedef struct LataDebugStats {
     uint64_t fam_add;
-    uint64_t ibtc_add;
+    uint64_t fam_overwrite;
+    uint64_t fam_clear_all;
+    uint64_t fam_invalidate;
     uint64_t tb_exec_count;
     uint64_t tu_boundary[LATA_TU_BOUNDARY_COUNT];
 #ifdef CONFIG_LATA_TU
@@ -632,11 +646,23 @@ void lata_debug_note_tu_boundary(LataTUBoundaryKind kind)
 
 void lata_debug_note_fam_add(bool full_assoc)
 {
-    if (full_assoc) {
-        lata_debug_stats.fam_add++;
-    } else {
-        lata_debug_stats.ibtc_add++;
-    }
+    (void)full_assoc;
+    lata_debug_stats.fam_add++;
+}
+
+void lata_debug_note_fam_overwrite(void)
+{
+    lata_debug_stats.fam_overwrite++;
+}
+
+void lata_debug_note_fam_invalidate(void)
+{
+    lata_debug_stats.fam_invalidate++;
+}
+
+void lata_debug_note_fam_clear_all(void)
+{
+    lata_debug_stats.fam_clear_all++;
 }
 
 void lata_debug_print_stats(CPUState *cpu)
@@ -649,15 +675,25 @@ void lata_debug_print_stats(CPUState *cpu)
 #endif
     if (profile_stats && env) {
         lata_profile_print_fam_stats(env);
-        qemu_log("[LATA] jump-cache fam_add=%" PRIu64 " ibtc_add=%" PRIu64 "\n",
-                 lata_debug_stats.fam_add, lata_debug_stats.ibtc_add);
+        qemu_log("[LATA] jump-cache fam_add=%" PRIu64
+                 " fam_overwrite=%" PRIu64
+                 " fam_invalidate=%" PRIu64
+                 " fam_clear_all=%" PRIu64 "\n",
+                 lata_debug_stats.fam_add, lata_debug_stats.fam_overwrite,
+                 lata_debug_stats.fam_invalidate,
+                 lata_debug_stats.fam_clear_all);
     } else if (option_lata_dump || option_lata_dump_tu ||
                option_lata_fam_stats) {
         if (option_lata_fam_stats && env) {
             lata_profile_print_fam_stats(env);
         }
-        qemu_log("[LATA] jump-cache fam_add=%" PRIu64 " ibtc_add=%" PRIu64 "\n",
-                 lata_debug_stats.fam_add, lata_debug_stats.ibtc_add);
+        qemu_log("[LATA] jump-cache fam_add=%" PRIu64
+                 " fam_overwrite=%" PRIu64
+                 " fam_invalidate=%" PRIu64
+                 " fam_clear_all=%" PRIu64 "\n",
+                 lata_debug_stats.fam_add, lata_debug_stats.fam_overwrite,
+                 lata_debug_stats.fam_invalidate,
+                 lata_debug_stats.fam_clear_all);
     }
 
 #ifdef CONFIG_LATA_TU

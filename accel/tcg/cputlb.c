@@ -41,6 +41,9 @@
 #endif
 #include "tcg/tcg-ldst.h"
 #include "tcg/oversized-guest.h"
+#ifdef CONFIG_LATA
+#include "target/arm/lata/include/lata.h"
+#endif
 
 /* DEBUG defines, enable DEBUG_TLB_LOG to log to the CPU_LOG_MMU target */
 /* #define DEBUG_TLB */
@@ -112,6 +115,9 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
     for (i = 0; i < TB_JMP_PAGE_SIZE; i++) {
         qatomic_set(&jc->array[i0 + i].tb, NULL);
     }
+#ifdef CONFIG_LATA
+    lata_fam_clear_page(cpu->env_ptr, page_addr);
+#endif
 }
 
 /**
@@ -364,6 +370,9 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
     qemu_spin_unlock(&env_tlb(env)->c.lock);
 
     tcg_flush_jmp_cache(cpu);
+#ifdef CONFIG_LATA
+    lata_fam_clear_all(env);
+#endif
 
     if (to_clean == ALL_MMUIDX_BITS) {
         qatomic_set(&env_tlb(env)->c.full_flush_count,
@@ -790,6 +799,9 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
      */
     if (d.len >= (TARGET_PAGE_SIZE * TB_JMP_CACHE_SIZE)) {
         tcg_flush_jmp_cache(cpu);
+#ifdef CONFIG_LATA
+        lata_fam_clear_all(env);
+#endif
         return;
     }
 

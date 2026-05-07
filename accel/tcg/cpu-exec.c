@@ -27,6 +27,7 @@
 #include "exec/exec-all.h"
 #include "tcg/tcg.h"
 #include "qemu/atomic.h"
+#include "qemu/cacheflush.h"
 #include "qemu/rcu.h"
 #include "exec/log.h"
 #include "qemu/main-loop.h"
@@ -46,6 +47,7 @@
 #ifdef CONFIG_LATA
 #include "target/arm/lata/include/lata-debug.h"
 #include "target/arm/lata/include/lata-options.h"
+#include "target/arm/lata/include/lata.h"
 #endif
 #ifdef CONFIG_LATA_TU
 #include "tu.h"
@@ -668,6 +670,29 @@ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr)
     uintptr_t jmp_rw = jmp_rx - tcg_splitwx_diff;
 
     tb->jmp_target_addr[n] = addr;
+#ifdef CONFIG_LATA
+    if (tb->jmp_reset_offset[n] != TB_JMP_OFFSET_INVALID) {
+        ptrdiff_t d_disp = (ptrdiff_t)(addr - jmp_rx) >> 2;
+        uint32_t insn;
+
+        if (d_disp >= -(1 << 25) && d_disp < (1 << 25)) {
+            insn = 0x50000000;
+            insn |= ((uint32_t)d_disp & 0xffff) << 10;
+            insn |= ((uint32_t)d_disp >> 16) & 0x3ff;
+        } else {
+            uintptr_t slot = (uintptr_t)&tb->jmp_target_addr[n];
+            intptr_t slot_disp = ((intptr_t)slot - (intptr_t)jmp_rx) >> 2;
+
+            g_assert(slot_disp >= -(1 << 19) && slot_disp < (1 << 19));
+            insn = 0x18000000;
+            insn |= 4; /* a0, reserved by LATA goto_tb stubs */
+            insn |= ((uint32_t)slot_disp & 0xfffff) << 5;
+        }
+        qatomic_set((uint32_t *)jmp_rw, insn);
+        flush_idcache_range(jmp_rx, jmp_rw, 4);
+        return;
+    }
+#endif
     tb_target_set_jmp_target(c_tb, n, jmp_rx, jmp_rw);
 // #endif
 }
@@ -1041,6 +1066,9 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             vaddr pc;
             uint64_t cs_base;
             uint32_t flags, cflags;
+#ifdef CONFIG_LATA_INDIRECT_JMP
+            bool tb_lookup_hit;
+#endif
 
             cpu_get_tb_cpu_state(cpu->env_ptr, &pc, &cs_base, &flags);
 
@@ -1063,6 +1091,9 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             }
 
             tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
+#ifdef CONFIG_LATA_INDIRECT_JMP
+            tb_lookup_hit = tb != NULL;
+#endif
             if (tb == NULL) {
                 CPUJumpCache *jc;
                 uint32_t h;
@@ -1072,9 +1103,6 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 tb = tu_gen_code(cpu, pc, cs_base, flags, cflags);
 #else
                 tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
-#ifdef CONFIG_LATA_INDIRECT_JMP
-                lata_fast_jmp_cache_add(cpu->env_ptr, pc, (uint64_t)(tb->tc.ptr));
-#endif
 #endif
                 mmap_unlock();
 
@@ -1094,7 +1122,6 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 }
 
             }
-
 #ifndef CONFIG_USER_ONLY
             /*
              * We don't take care of direct jumps when address mapping
@@ -1110,6 +1137,11 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             if (last_tb) {
                 tb_add_jump(last_tb, tb_exit, tb);
             }
+#ifdef CONFIG_LATA_INDIRECT_JMP
+            if (tb_lookup_hit && (tb_cflags(tb) & CF_PARALLEL)) {
+                lata_fam_add_tb(cpu->env_ptr, tb);
+            }
+#endif
 
             cpu_loop_exec_tb(cpu, tb, pc, &last_tb, &tb_exit);
 

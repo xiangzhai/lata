@@ -7,6 +7,7 @@
 #include "lata-debug.h"
 
 #include "exec/exec-all.h"
+#include "qemu/cacheflush.h"
 #include "qemu/log.h"
 #include "env.h"
 #ifdef CONFIG_LATA_TU
@@ -171,8 +172,6 @@ void lata(void){
 
 __thread ENV *lsenv;
 static __thread ENV lsenv_real;
-uint64_t *ibtc_cache;
-uint64_t *fam_cache;
 
 static __thread TRANSLATION_DATA tr_data_real;
 __thread TRANSLATION_DATA *tr_data;
@@ -793,84 +792,346 @@ void lata_gen_call_helper_epilogue_no_flags(TCGContext *tcg_ctx)
     }
 }
 
-void lata_fast_jmp_cache_add(CPUArchState *env, uint64_t guest_pc, uint64_t host_pc)
+static inline uint32_t lata_fam_hash(uint64_t pc)
 {
-    if(option_fam_jmp_cache > 0){
-        if (guest_pc < env->mapping_range[0] || guest_pc >= env->mapping_range[1]) {
-            return;
-        }
-        uint64_t* pc_map_cache_ptr = (uint64_t*)env->pc_map_cache;
-        pc_map_cache_ptr[guest_pc] = host_pc;  
-        lata_debug_note_fam_add(true);
-        // printf("cache:%p guest_pc:%p  host_pc:%p store_pc:%p store_pos:%p\n",(void*)env->pc_map_cache,(void*)guest_pc,(void*)host_pc,(void *)pc_map_cache_ptr[guest_pc],(void *)(uint64_t*)(cpu->pc_map_cache + guest_pc));
-        return;
-    }
-    if (option_fam_jmp_cache < 0) {
-        return;
-    }
-    int64_t index = ((guest_pc >> LATA_PC_LOW_BIT) & (TB_JMP_CACHE_SIZE - 1)) << 4;
-    *(uint64_t*)((uint8_t*)env->pc_map_cache + index) = guest_pc;
-    *(uint64_t*)((uint8_t*)env->pc_map_cache + index + 8) = host_pc;
-    lata_debug_note_fam_add(false);
+    return (pc ^ (pc >> TB_JMP_CACHE_BITS)) & (TB_JMP_CACHE_SIZE - 1);
 }
 
-void lata_fast_jmp_cache_invalidate(CPUArchState *env, uint64_t guest_pc,
-                                    uint64_t host_pc)
+static inline uint32_t lata_fam_tb_cflags(TranslationBlock *tb)
 {
-    if (!env->pc_map_cache) {
-        return;
+    return tb_cflags(tb) & ~CF_INVALID;
+}
+
+QEMU_BUILD_BUG_ON(sizeof(LataFAMEntry) != 32);
+
+static bool lata_fam_tb_cacheable(TranslationBlock *tb)
+{
+    uint32_t cflags = tb_cflags(tb);
+
+    if (option_fam_jmp_cache < 0) {
+        return false;
     }
+    if (cflags & (CF_COUNT_MASK | CF_INVALID | CF_NO_GOTO_TB |
+                  CF_NO_GOTO_PTR | CF_SINGLE_STEP | CF_LAST_IO |
+                  CF_MEMI_ONLY | CF_USE_ICOUNT | CF_NOIRQ | CF_PCREL)) {
+        return false;
+    }
+    return true;
+}
+
+static void lata_fam_clear_entry(LataFAMEntry *entry)
+{
+    qatomic_set(&entry->host_ptr, NULL);
+    qatomic_set(&entry->tb, NULL);
+    entry->pc = 0;
+    entry->cs_base = 0;
+    entry->flags_cflags = 0;
+}
+
+static bool lata_fam_entry_has_tb(LataFAMCache *cache, LataFAMEntry *entry,
+                                  uint32_t index, TranslationBlock *tb,
+                                  uint32_t cflags)
+{
+    if (entry->pc != tb->pc || entry->cs_base != tb->cs_base ||
+        entry->flags != tb->flags || entry->cflags != cflags) {
+        return false;
+    }
+
+    if (cache->fast_tbs) {
+        return qatomic_load_acquire(&cache->fast_tbs[index]) == tb &&
+               qatomic_load_acquire(&entry->host_ptr) == tb->tc.ptr;
+    }
+    return qatomic_load_acquire(&entry->tb) == tb;
+}
+
+bool lata_fam_init(CPUArchState *env)
+{
+    LataFAMCache *cache;
+    size_t size;
+
+    lata_fam_destroy(env);
+    env->lata_fam_cache = NULL;
+    env->lata_cpu_state = env_cpu(env);
+
+    if (option_fam_jmp_cache < 0) {
+        return true;
+    }
+
+    size = sizeof(*cache) + sizeof(cache->entries[0]) * TB_JMP_CACHE_SIZE;
+    cache = g_malloc0(size);
+    cache->size = TB_JMP_CACHE_SIZE;
+    cache->mask = TB_JMP_CACHE_SIZE - 1;
     if (option_fam_jmp_cache > 0) {
-        if (guest_pc < env->mapping_range[0] || guest_pc >= env->mapping_range[1]) {
-            return;
-        }
-        uint64_t *pc_map_cache_ptr = (uint64_t *)env->pc_map_cache;
-        if (pc_map_cache_ptr[guest_pc] == host_pc) {
-            pc_map_cache_ptr[guest_pc] = 0;
-        }
-        return;
+        cache->fast_tbs = g_new0(TranslationBlock *, TB_JMP_CACHE_SIZE);
     }
-    if (option_fam_jmp_cache < 0) {
+    env->lata_fam_cache = cache;
+    return true;
+}
+
+void lata_fam_destroy(CPUArchState *env)
+{
+    LataFAMCache *cache = env->lata_fam_cache;
+
+    if (cache) {
+        g_free(cache->fast_tbs);
+        g_free(cache);
+    }
+    env->lata_fam_cache = NULL;
+}
+
+void lata_fam_clear_all(CPUArchState *env)
+{
+    LataFAMCache *cache = env->lata_fam_cache;
+
+    if (!cache) {
         return;
     }
 
-    int64_t index = ((guest_pc >> LATA_PC_LOW_BIT) &
-                     (TB_JMP_CACHE_SIZE - 1)) << 4;
-    uint8_t *entry = (uint8_t *)env->pc_map_cache + index;
+    for (uint32_t i = 0; i < cache->size; i++) {
+        lata_fam_clear_entry(&cache->entries[i]);
+    }
+    if (cache->fast_tbs) {
+        memset(cache->fast_tbs, 0,
+               sizeof(cache->fast_tbs[0]) * cache->size);
+    }
+    lata_debug_note_fam_clear_all();
+}
 
-    if (*(uint64_t *)entry == guest_pc &&
-        *(uint64_t *)(entry + 8) == host_pc) {
-        *(uint64_t *)entry = 0;
-        *(uint64_t *)(entry + 8) = 0;
+void lata_fam_clear_page(CPUArchState *env, uint64_t page_addr)
+{
+    LataFAMCache *cache = env->lata_fam_cache;
+    uint64_t page = page_addr & TARGET_PAGE_MASK;
+
+    if (!cache) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < cache->size; i++) {
+        LataFAMEntry *entry = &cache->entries[i];
+        TranslationBlock *tb = cache->fast_tbs ?
+            qatomic_load_acquire(&cache->fast_tbs[i]) :
+            qatomic_load_acquire(&entry->tb);
+        void *host_ptr = qatomic_load_acquire(&entry->host_ptr);
+        bool live = tb || host_ptr;
+        bool entry_matches = (entry->pc & TARGET_PAGE_MASK) == page;
+        bool tb_matches = tb && (tb->pc & TARGET_PAGE_MASK) == page;
+
+        if (live && (entry_matches || tb_matches)) {
+            lata_fam_clear_entry(entry);
+            if (cache->fast_tbs) {
+                qatomic_set(&cache->fast_tbs[i], NULL);
+            }
+            lata_debug_note_fam_invalidate();
+        }
     }
 }
 
-void lata_fast_jmp_cache_init(CPUArchState *env,uint64_t start_code,uint64_t end_code)
+void lata_fam_clear_all_cpus(void)
 {
-    size_t malloc_size;
-    if(option_fam_jmp_cache > 0){
-        env->mapping_range[0] = start_code;
-        env->mapping_range[1] = end_code; 
-        malloc_size = (end_code - start_code) * 8;
-        void* p = malloc(malloc_size);
-        if (!p) {
-            lsassertm(0, "fam_indirect malloc error!\n");
-        }
-        memset(p, 0, malloc_size);
-        fam_cache = p - (start_code * 8);
-        env->pc_map_cache = fam_cache;    
-        return;    
+    CPUState *cpu;
+
+    CPU_FOREACH(cpu) {
+        lata_fam_clear_all(cpu->env_ptr);
     }
-    if (option_fam_jmp_cache < 0) {
-        env->pc_map_cache = NULL;
+}
+
+void lata_fam_add_tb(CPUArchState *env, TranslationBlock *tb)
+{
+    LataFAMCache *cache = env->lata_fam_cache;
+    LataFAMEntry *entry;
+    uint32_t cflags;
+    uint32_t index;
+
+    if (!cache || !tb || !tb->tc.ptr || !lata_fam_tb_cacheable(tb)) {
         return;
     }
-    malloc_size = sizeof(uint64_t) * TB_JMP_CACHE_SIZE * 2;
-    ibtc_cache = malloc(malloc_size);
-    if (!ibtc_cache) {
-        lsassertm(0, "ibtc_cache malloc error!\n");
+
+    cflags = lata_fam_tb_cflags(tb);
+    index = lata_fam_hash(tb->pc) & cache->mask;
+    entry = &cache->entries[index];
+    if (lata_fam_entry_has_tb(cache, entry, index, tb, cflags)) {
+        return;
     }
-    env->pc_map_cache = ibtc_cache;    
+    if (entry->pc || qatomic_load_acquire(&entry->tb) ||
+        qatomic_load_acquire(&entry->host_ptr)) {
+        lata_debug_note_fam_overwrite();
+    }
+    lata_fam_clear_entry(entry);
+    if (cache->fast_tbs) {
+        qatomic_set(&cache->fast_tbs[index], NULL);
+    }
+    entry->pc = tb->pc;
+    entry->cs_base = tb->cs_base;
+    entry->flags = tb->flags;
+    entry->cflags = cflags;
+    if (cache->fast_tbs) {
+        qatomic_store_release(&cache->fast_tbs[index], tb);
+        qatomic_store_release(&entry->host_ptr, tb->tc.ptr);
+    } else {
+        qatomic_store_release(&entry->tb, tb);
+    }
+    lata_debug_note_fam_add(option_fam_jmp_cache > 0);
+}
+
+void lata_fam_invalidate_tb(CPUArchState *env, TranslationBlock *tb)
+{
+    LataFAMCache *cache = env->lata_fam_cache;
+    LataFAMEntry *entry;
+    uint32_t cflags;
+    uint32_t index;
+
+    if (!cache || !tb) {
+        return;
+    }
+
+    cflags = tb_cflags(tb) & ~CF_INVALID;
+    index = lata_fam_hash(tb->pc) & cache->mask;
+    entry = &cache->entries[index];
+    if (entry->pc != tb->pc || entry->cs_base != tb->cs_base ||
+        entry->flags != tb->flags || entry->cflags != cflags) {
+        return;
+    }
+
+    if (cache->fast_tbs) {
+        if (qatomic_load_acquire(&cache->fast_tbs[index]) != tb) {
+            return;
+        }
+    } else if (qatomic_load_acquire(&entry->tb) != tb) {
+        return;
+    }
+
+    lata_fam_clear_entry(entry);
+    if (cache->fast_tbs) {
+        qatomic_set(&cache->fast_tbs[index], NULL);
+    }
+    lata_debug_note_fam_invalidate();
+}
+
+static bool lata_fam_branch_disp_fits(uintptr_t fix_addr, uintptr_t target)
+{
+    int64_t disp = ((int64_t)target - (int64_t)fix_addr) >> 2;
+
+    return disp >= -(1 << 25) && disp < (1 << 25);
+}
+
+static bool lata_fam_patch_direct_branch(TranslationBlock *tb, int n,
+                                         TranslationBlock *target)
+{
+    uintptr_t fix_addr;
+    uintptr_t target_addr;
+    uint32_t *fix_rw;
+    uint32_t insn;
+    int64_t disp;
+
+    if (tb->jmp_insn_offset[n] == TB_JMP_OFFSET_INVALID ||
+        !target || !target->tc.ptr) {
+        return false;
+    }
+
+    fix_addr = (uintptr_t)tb->tc.ptr + tb->jmp_insn_offset[n];
+    target_addr = (uintptr_t)target->tc.ptr;
+    insn = *(uint32_t *)fix_addr;
+    if ((insn & 0xfc000000) != 0x50000000 &&
+        (insn & 0xfe00001f) != (0x18000000 | 4)) {
+        return false;
+    }
+
+    if (lata_fam_branch_disp_fits(fix_addr, target_addr)) {
+        disp = ((int64_t)target_addr - (int64_t)fix_addr) >> 2;
+        insn = 0x50000000;
+        insn |= ((uint32_t)disp & 0xffff) << 10;
+        insn |= ((uint32_t)disp >> 16) & 0x3ff;
+    } else {
+        uintptr_t slot = (uintptr_t)&tb->jmp_target_addr[n];
+        intptr_t slot_disp = ((intptr_t)slot - (intptr_t)fix_addr) >> 2;
+
+        if (slot_disp < -(1 << 19) || slot_disp >= (1 << 19)) {
+            return false;
+        }
+        insn = 0x18000000 | 4;
+        insn |= ((uint32_t)slot_disp & 0xfffff) << 5;
+    }
+    fix_rw = (uint32_t *)(fix_addr - tcg_splitwx_diff);
+    tb->jmp_target_addr[n] = target_addr;
+    qatomic_set(fix_rw, insn);
+    flush_idcache_range(fix_addr, (uintptr_t)fix_rw, 4);
+    return true;
+}
+
+void lata_fam_prelink_tb(TranslationBlock *tb)
+{
+    if (!tb || option_fam_jmp_cache < 0) {
+        return;
+    }
+
+    for (int n = 0; n < 2; n++) {
+        TranslationBlock *target = tb->lata_prelink_tb[n];
+        uintptr_t old;
+
+        if (!target || !target->tc.ptr ||
+            tb->jmp_reset_offset[n] == TB_JMP_OFFSET_INVALID ||
+            tb->jmp_insn_offset[n] == TB_JMP_OFFSET_INVALID) {
+            continue;
+        }
+
+        qemu_spin_lock(&target->jmp_lock);
+        if (target->cflags & CF_INVALID) {
+            qemu_spin_unlock(&target->jmp_lock);
+            continue;
+        }
+
+        old = qatomic_cmpxchg(&tb->jmp_dest[n], (uintptr_t)NULL,
+                              (uintptr_t)target);
+        if (old) {
+            qemu_spin_unlock(&target->jmp_lock);
+            continue;
+        }
+
+        if (!lata_fam_patch_direct_branch(tb, n, target)) {
+            qatomic_set(&tb->jmp_dest[n], (uintptr_t)NULL);
+            qemu_spin_unlock(&target->jmp_lock);
+            continue;
+        }
+
+        tb->jmp_list_next[n] = target->jmp_list_head;
+        target->jmp_list_head = (uintptr_t)tb | n;
+        qemu_spin_unlock(&target->jmp_lock);
+    }
+}
+
+TranslationBlock *lata_fam_lookup_tb(CPUArchState *env, uint64_t pc,
+                                     uint64_t cs_base, uint32_t flags,
+                                     uint32_t cflags)
+{
+    LataFAMCache *cache = env ? env->lata_fam_cache : NULL;
+    TranslationBlock *tb;
+    uint32_t index;
+
+    if (!cache || option_fam_jmp_cache < 0) {
+        return NULL;
+    }
+
+    cflags &= ~CF_INVALID;
+    index = lata_fam_hash(pc) & cache->mask;
+    LataFAMEntry *entry = &cache->entries[index];
+    uint32_t tb_cflags;
+
+    if (cache->fast_tbs) {
+        tb = qatomic_load_acquire(&cache->fast_tbs[index]);
+    } else {
+        tb = qatomic_load_acquire(&entry->tb);
+    }
+    if (!tb || entry->pc != pc || entry->cs_base != cs_base ||
+        entry->flags != flags || entry->cflags != cflags ||
+        tb->pc != pc || tb->cs_base != cs_base || tb->flags != flags) {
+        return NULL;
+    }
+
+    tb_cflags = lata_fam_tb_cflags(tb);
+    if (tb_cflags != cflags || (tb->cflags & CF_INVALID)) {
+        return NULL;
+    }
+    return tb->tc.ptr ? tb : NULL;
 }
 
 /* gpr同时为src和dst, 使用alloc_gpr_src,并且需要store回去 */

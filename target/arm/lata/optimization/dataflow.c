@@ -369,6 +369,8 @@ static const LataGPRRule gpr_rules[] = {
     { AARCH64_A64_SYS, fact_sys },
     { AARCH64_A64_DATA_PROC_REG, fact_dataproc_reg },
     { AARCH64_A64_DATA_PROC_SIMD_FD, fact_simd_fp },
+    { AARCH64_A64_EXCP_ILLEGAL, NULL },
+    { AARCH64_A64_EXCP_BTI, NULL },
     { AARCH64_A64_NULL, NULL },
 };
 
@@ -702,6 +704,8 @@ static void lata_df_analyze_ir1(LataIR1Facts *fact, DisasContext *ir1)
     case AARCH64_A64_HLT:
     case AARCH64_A64_SYS:
     case AARCH64_A64_CRYPTO:
+    case AARCH64_A64_EXCP_ILLEGAL:
+    case AARCH64_A64_EXCP_BTI:
         fact->helper_boundary = true;
         fact->state_boundary = true;
         break;

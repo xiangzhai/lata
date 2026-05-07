@@ -781,7 +781,6 @@ static inline void rewind_if_in_safe_syscall(void *puc)
     }
 }
 
-extern long context_switch_native_to_bt_ret_0;
 static void host_signal_handler(int host_sig, siginfo_t *info, void *puc)
 {
     CPUArchState *env = thread_cpu->env_ptr;
@@ -795,12 +794,6 @@ static void host_signal_handler(int host_sig, siginfo_t *info, void *puc)
     bool sync_sig = false;
     void *sigmask = host_signal_mask(uc);
 
-#ifdef CONFIG_LATA
-    if(option_fam_jmp_cache > 0 && host_sig == SIGBUS){
-        uc->uc_mcontext.__pc = context_switch_native_to_bt_ret_0;
-        return;
-    }
-#endif
     /*
      * Non-spoofed SIGSEGV and SIGBUS are synchronous, and need special
      * handling wrt signal blocking and unwinding.

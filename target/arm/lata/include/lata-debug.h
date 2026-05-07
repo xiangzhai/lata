@@ -37,6 +37,13 @@ typedef enum LataFAMKind {
     LATA_FAM_KIND_COUNT,
 } LataFAMKind;
 
+typedef enum LataFAMMissReason {
+    LATA_FAM_MISS_EMPTY = 0,
+    LATA_FAM_MISS_KEY,
+    LATA_FAM_MISS_INVALID,
+    LATA_FAM_MISS_UNSUPPORTED,
+} LataFAMMissReason;
+
 #ifdef CONFIG_LATA_DEBUG
 void lata_debug_begin_tb(TranslationBlock *tb, LataDebugDumpState *state);
 void lata_debug_end_tb(const LataDebugDumpState *state);
@@ -71,6 +78,9 @@ void lata_debug_trace_tu_edge_state(TranslationBlock *tb, int n,
 #endif
 
 void lata_debug_note_fam_add(bool full_assoc);
+void lata_debug_note_fam_invalidate(void);
+void lata_debug_note_fam_clear_all(void);
+void lata_debug_note_fam_overwrite(void);
 void lata_debug_print_stats(CPUState *cpu);
 #else
 static inline void lata_debug_begin_tb(TranslationBlock *tb,
@@ -122,6 +132,9 @@ static inline void lata_debug_trace_tu_edge_state(TranslationBlock *tb, int n,
 #endif
 
 static inline void lata_debug_note_fam_add(bool full_assoc) {}
+static inline void lata_debug_note_fam_invalidate(void) {}
+static inline void lata_debug_note_fam_clear_all(void) {}
+static inline void lata_debug_note_fam_overwrite(void) {}
 #ifndef CONFIG_LATA_PROFILE
 static inline void lata_debug_print_stats(CPUState *cpu) {}
 #endif

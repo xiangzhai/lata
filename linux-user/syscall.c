@@ -143,6 +143,9 @@
 #include "fd-trans.h"
 #include "tcg/tcg.h"
 #include "cpu_loop-common.h"
+#ifdef CONFIG_LATA
+#include "target/arm/lata/include/lata.h"
+#endif
 
 #ifndef CLONE_IO
 #define CLONE_IO                0x80000000      /* Clone io context */
@@ -9247,6 +9250,9 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
                              FUTEX_WAKE, INT_MAX, NULL, NULL, 0);
             }
 
+#ifdef CONFIG_LATA
+            lata_fam_destroy(cpu_env);
+#endif
             object_unparent(OBJECT(cpu));
             object_unref(OBJECT(cpu));
             /*
@@ -9264,6 +9270,9 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         }
 
         pthread_mutex_unlock(&clone_lock);
+#ifdef CONFIG_LATA
+        lata_fam_destroy(cpu_env);
+#endif
         preexit_cleanup(cpu_env, arg1);
         _exit(arg1);
         return 0; /* avoid warning */
@@ -11164,6 +11173,9 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
 #ifdef __NR_exit_group
         /* new thread calls */
     case TARGET_NR_exit_group:
+#ifdef CONFIG_LATA
+        lata_fam_destroy(cpu_env);
+#endif
         preexit_cleanup(cpu_env, arg1);
         return get_errno(exit_group(arg1));
 #endif

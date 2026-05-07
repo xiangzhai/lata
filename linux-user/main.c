@@ -258,6 +258,12 @@ CPUArchState *cpu_copy(CPUArchState *env)
         cpu_breakpoint_insert(new_cpu, bp->pc, bp->flags, NULL);
     }
 
+#ifdef CONFIG_LATA
+    new_env->lata_fam_cache = NULL;
+    new_env->lata_cpu_state = new_cpu;
+    lata_fam_init(new_env);
+#endif
+
     return new_env;
 }
 
@@ -544,16 +550,18 @@ static void handle_arg_lata_fam_stats(const char *arg)
     lata_options_enable_fam_stats(arg);
 }
 
-static void handle_arg_lata_fam_cache(const char *arg)
-{
-    lata_options_parse_fam_cache(arg);
-}
-
 static void handle_arg_lata_peephole_stats(const char *arg)
 {
     lata_options_enable_peephole_stats(arg);
 }
 
+#endif
+
+#ifdef CONFIG_LATA_INDIRECT_JMP
+static void handle_arg_lata_fam_cache(const char *arg)
+{
+    lata_options_parse_fam_cache(arg);
+}
 #endif
 
 struct qemu_argument {
@@ -649,11 +657,13 @@ static const struct qemu_argument arg_table[] = {
      "", "print LATA TU statistics at exit"},
     {"lata-fam-stats", "LATA_FAM_STATS", false, handle_arg_lata_fam_stats,
      "", "print LATA FAM/indirect jump statistics at exit"},
-    {"lata-fam-cache", "LATA_FAM_CACHE", true, handle_arg_lata_fam_cache,
-     "1", "select LATA indirect jump cache (debug: 1=direct FAM, 0=IBTC, -1=off)"},
     {"lata-peephole-stats", "LATA_PEEPHOLE_STATS", false,
      handle_arg_lata_peephole_stats,
      "", "print LATA IR2 peephole statistics at exit"},
+#endif
+#ifdef CONFIG_LATA_INDIRECT_JMP
+    {"lata-fam-cache", "LATA_FAM_CACHE", true, handle_arg_lata_fam_cache,
+     "1", "select LATA indirect jump cache (-1=off, 0=safe FAM, 1=fast FAM)"},
 #endif
 #ifdef CONFIG_PLUGIN
     {"plugin",     "QEMU_PLUGIN",      true,  handle_arg_plugin,
@@ -1101,7 +1111,7 @@ int main(int argc, char **argv, char **envp)
         _exit(EXIT_FAILURE);
     }
 #ifdef CONFIG_LATA_INDIRECT_JMP
-    lata_fast_jmp_cache_init(env,(uint64_t)info->start_code,(uint64_t)info->end_code);
+    lata_fam_init(env);
 #endif
     for (wrk = target_environ; *wrk; wrk++) {
         g_free(*wrk);
@@ -1155,6 +1165,7 @@ int main(int argc, char **argv, char **envp)
     env->jr_cnt = 0;
     env->jr_hit = 0;
 #endif
+    env->lata_cpu_state = cpu;
     lata_prologue_init(tcg_ctx);
 #else
     tcg_prologue_init(tcg_ctx);
