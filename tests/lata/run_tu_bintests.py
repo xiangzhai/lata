@@ -192,6 +192,88 @@ _start:
         b.eq    pass
         b       fail
 """,
+    "nzcv_adc_sbc_live_across_edge": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #-1
+        adds    xzr, x19, #1
+        b       check_adc
+        b       fail
+check_adc:
+        mov     x20, #7
+        adc     x21, x20, xzr
+        cmp     x21, #8
+        b.ne    fail
+        mov     x22, #0
+        cmp     x22, #0
+        sbc     x23, x20, xzr
+        cmp     x23, #7
+        b.eq    pass
+        b       fail
+""",
+    "nzcv_ccmp_live_across_edge": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #5
+        cmp     x19, #5
+        b       check_ccmp
+        b       fail
+check_ccmp:
+        mov     x20, #9
+        ccmp    x20, #9, #0, eq
+        b.ne    fail
+        ccmp    x20, #8, #4, eq
+        b.eq    fail
+        b       pass
+""",
+    "nzcv_csel_family_live_across_edge": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #3
+        cmp     x19, #3
+        b       check_csel
+        b       fail
+check_csel:
+        mov     x20, #11
+        mov     x21, #22
+        csel    x22, x20, x21, eq
+        cmp     x22, #11
+        b.ne    fail
+        cmp     x19, #4
+        csinc   x23, x20, x21, eq
+        cmp     x23, #23
+        b.ne    fail
+        cmp     x19, #4
+        csinv   x24, x20, x21, eq
+        mvn     x25, x21
+        cmp     x24, x25
+        b.ne    fail
+        cmp     x19, #4
+        csneg   x26, x20, x21, eq
+        neg     x27, x21
+        cmp     x26, x27
+        b.eq    pass
+        b       fail
+""",
+    "nzcv_mrs_msr_live_across_edge": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #0
+        cmp     x19, #0
+        mrs     x20, nzcv
+        mov     x21, #1
+        cmp     x21, #0
+        b       restore_flags
+        b       fail
+restore_flags:
+        msr     nzcv, x20
+        b.eq    pass
+        b       fail
+""",
     "setf_preserves_c_and_sets_nzv": r"""
         .text
         .global _start
@@ -297,6 +379,19 @@ target:
         mov     x0, #77
         ret     x17
 """,
+    "forced_unlink_direct_edge": r"""
+        .text
+        .global _start
+_start:
+        mov     x19, #0
+        b       linked_target
+        b       fail
+linked_target:
+        add     x19, x19, #1
+        cmp     x19, #1
+        b.eq    pass
+        b       fail
+""",
 }
 
 
@@ -375,6 +470,24 @@ def check_required_output(name, result, required):
     return True
 
 
+def check_debug_surface_output(name, result):
+    text = result.stdout + result.stderr
+
+    if "[LATA] TU" not in text:
+        print(f"SKIP {name} debug surface: TU debug output is not enabled")
+        return True
+
+    needles = ["[LATA] TU", "fallback", "edge"]
+    if name == "forced_unlink_direct_edge":
+        needles.append("unlink")
+    return check_required_output(name, result, needles)
+
+
+def qemu_supports_arg(qemu, arg):
+    result = run([qemu, "--help"], 10)
+    return arg in (result.stdout + result.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qemu-lata", default="build/lata-aarch64")
@@ -383,12 +496,20 @@ def main():
     parser.add_argument("--filter")
     parser.add_argument("--debug-tu", action="store_true",
                         help="also pass -lata-dump tu to LATA")
+    parser.add_argument("--check-debug-surface", action="store_true",
+                        help="verify TU dump, TU stats and forced unlink output")
     parser.add_argument("--lata-arg", action="append", default=[],
                         help="extra argument passed to QEMU-LATA; repeatable")
     parser.add_argument("--require-lata-output", action="append", default=[],
                         help="substring required in LATA stdout/stderr; repeatable")
     parser.add_argument("--keep", action="store_true")
     args = parser.parse_args()
+    has_debug_cli = qemu_supports_arg(args.qemu_lata, "-lata-dump")
+    has_tu_debug = has_debug_cli and qemu_supports_arg(args.qemu_lata,
+                                                       "-lata-tu-stats")
+    if args.check_debug_surface and not has_tu_debug:
+        print("SKIP debug surface checks: LATA binary lacks debug/TU CLI")
+        args.check_debug_surface = False
 
     selected = [(name, asm) for name, asm in TESTS.items()
                 if not args.filter or args.filter in name]
@@ -408,6 +529,8 @@ def main():
             if lata_ok and args.require_lata_output:
                 lata_ok = check_required_output(name, lata,
                                                 args.require_lata_output)
+            if lata_ok and args.check_debug_surface:
+                lata_ok = check_debug_surface_output(name, lata)
 
             if tcg_ok and lata_ok:
                 print(f"PASS {name}")

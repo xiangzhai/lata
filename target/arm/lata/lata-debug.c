@@ -8,6 +8,7 @@
 #include "target/arm/lata/include/lata.h"
 #include "target/arm/lata/include/lata-debug.h"
 #include "target/arm/lata/include/dataflow.h"
+#include "target/arm/lata/include/ir2-peephole.h"
 
 #if defined(CONFIG_LATA_DEBUG) || defined(CONFIG_LATA_PROFILE)
 static const char *lata_fam_kind_name(LataFAMKind kind)
@@ -527,7 +528,7 @@ void lata_debug_dump_tu(CPUState *cpu, TranslationBlock **tb_list,
         TranslationBlock *tb = tb_list[i];
 
         qemu_log("  tb[%02u] pc=0x%016" PRIx64 " size=%u icount=%u "
-                 "host=%p code_size=%u tu_off=0x%x flags=0x%x cflags=0x%x "
+                 "host=%p code_size=%u tu_off=0x%zx flags=0x%x cflags=0x%x "
                  "cs_base=0x%016" PRIx64 " last_ir1_type=%d "
                  "next_pc=0x%016" PRIx64 " target_pc=0x%016" PRIx64
                  " mode=%d fallback=%s\n",
@@ -687,5 +688,7 @@ void lata_debug_print_stats(CPUState *cpu)
         }
     }
 #endif
+
+    lata_ir2_peephole_dump_stats();
 }
 #endif

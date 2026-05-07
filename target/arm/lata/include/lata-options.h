@@ -21,6 +21,7 @@ extern int option_lata_trace_vec;
 extern int option_lata_dataflow_opt;
 extern int option_lata_tu_stats;
 extern int option_lata_fam_stats;
+extern int option_lata_peephole_stats;
 
 extern uint64_t lata_debug_tb_pc;
 extern uint64_t lata_trace_mem;
@@ -46,5 +47,6 @@ void lata_options_parse_fp_precise(const char *arg);
 void lata_options_parse_dataflow_opt(const char *arg);
 void lata_options_enable_tu_stats(const char *arg);
 void lata_options_enable_fam_stats(const char *arg);
+void lata_options_enable_peephole_stats(const char *arg);
 
 #endif

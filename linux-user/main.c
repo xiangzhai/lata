@@ -504,6 +504,11 @@ static void handle_arg_lata_break_insn(const char *arg)
     lata_options_parse_break_insn(arg);
 }
 
+static void handle_arg_lata_break_pc(const char *arg)
+{
+    lata_options_parse_break_insn(arg);
+}
+
 static void handle_arg_lata_unlink(const char *arg)
 {
     lata_options_parse_unlink(arg);
@@ -537,6 +542,11 @@ static void handle_arg_lata_tu_stats(const char *arg)
 static void handle_arg_lata_fam_stats(const char *arg)
 {
     lata_options_enable_fam_stats(arg);
+}
+
+static void handle_arg_lata_peephole_stats(const char *arg)
+{
+    lata_options_enable_peephole_stats(arg);
 }
 
 #endif
@@ -607,7 +617,7 @@ static const struct qemu_argument arg_table[] = {
 #endif
 #ifdef CONFIG_LATA_DEBUG
     {"lata-dump", "LATA_DUMP", true, handle_arg_lata_dump,
-     "ir1,ir2,host,tu", "dump LATA translation data"},
+     "ir1,ir2,host,tu,cfg", "dump LATA translation data"},
     {"lata-show-tb", "LATA_SHOW_TB", true, handle_arg_lata_show_tb,
      "pc", "dump one LATA TB by guest PC"},
     {"lata-trace", "LATA_TRACE", true, handle_arg_lata_trace,
@@ -626,12 +636,17 @@ static const struct qemu_argument arg_table[] = {
      "addr", "trace stores to a guest address"},
     {"lata-break-insn", "LATA_BREAK_INSN", true, handle_arg_lata_break_insn,
      "pc", "break when translating a guest instruction PC"},
+    {"lata-break-pc", "LATA_BREAK_PC", true, handle_arg_lata_break_pc,
+     "pc", "alias for -lata-break-insn"},
     {"lata-unlink", "LATA_UNLINK", true, handle_arg_lata_unlink,
      "count[,cpu]", "debug TU unlink after count events"},
     {"lata-tu-stats", "LATA_TU_STATS", false, handle_arg_lata_tu_stats,
      "", "print LATA TU statistics at exit"},
     {"lata-fam-stats", "LATA_FAM_STATS", false, handle_arg_lata_fam_stats,
      "", "print LATA FAM/indirect jump statistics at exit"},
+    {"lata-peephole-stats", "LATA_PEEPHOLE_STATS", false,
+     handle_arg_lata_peephole_stats,
+     "", "print LATA IR2 peephole statistics at exit"},
 #endif
 #ifdef CONFIG_PLUGIN
     {"plugin",     "QEMU_PLUGIN",      true,  handle_arg_plugin,

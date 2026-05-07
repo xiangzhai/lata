@@ -24,6 +24,7 @@ int option_lata_trace_vec;
 int option_lata_dataflow_opt = 1;
 int option_lata_tu_stats;
 int option_lata_fam_stats;
+int option_lata_peephole_stats;
 
 uint64_t lata_debug_tb_pc;
 uint64_t lata_trace_mem;
@@ -86,6 +87,7 @@ void lata_options_init(void)
     option_lata_dataflow_opt = 1;
     option_lata_tu_stats = 0;
     option_lata_fam_stats = 0;
+    option_lata_peephole_stats = 0;
 
     lata_debug_tb_pc = 0;
     lata_trace_mem = 0;
@@ -289,4 +291,9 @@ void lata_options_enable_tu_stats(const char *arg)
 void lata_options_enable_fam_stats(const char *arg)
 {
     option_lata_fam_stats = !arg || atoi(arg) != 0;
+}
+
+void lata_options_enable_peephole_stats(const char *arg)
+{
+    option_lata_peephole_stats = !arg || atoi(arg) != 0;
 }

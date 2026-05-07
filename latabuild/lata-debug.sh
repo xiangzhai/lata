@@ -26,11 +26,10 @@ build() {
         --enable-capstone
         --disable-werror  
         --enable-lata
-        # Optionally enable optimization options for testing
-        # --insts-pattern-opt
-        # --indirect-jmp-opt
-        # --split-tb-opt
-        # --lata-tu-opt
+        --insts-pattern-opt
+        --indirect-jmp-opt
+        --split-tb-opt
+        --lata-tu-opt
 	)
 
 	pushd $srcdir/build_aarch64_dbg >/dev/null
