@@ -378,6 +378,43 @@ static void lata_compute_reg_offset_addr(IR2_OPND dst, IR2_OPND base,
     la_bstrpick_d(dst, dst, 47, 0);
 }
 
+static void store_gpr_dst_w_dirty(int reg, IR2_OPND opnd)
+{
+    if (reg == 31) {
+        return;
+    }
+
+    if (arm_la_map[reg] >= 0) {
+        if (clearGprHigh) {
+            set_w_write_flag(reg, false);
+        } else {
+            la_bstrpick_d(opnd, opnd, 31, 0);
+        }
+        return;
+    }
+
+    if (clearGprHigh && !lata_df_reg_high_live_after_write(reg)) {
+        store_gpr_dst(reg, opnd);
+        return;
+    }
+
+    la_bstrpick_d(opnd, opnd, 31, 0);
+    store_gpr_dst(reg, opnd);
+}
+
+static void store_gpr_dst_reg_width(int reg, IR2_OPND opnd, bool is_64bit)
+{
+    if (is_64bit) {
+        if (reg != 31 && arm_la_map[reg] >= 0 && clearGprHigh) {
+            set_w_write_flag(reg, true);
+        }
+        store_gpr_dst(reg, opnd);
+        return;
+    }
+
+    store_gpr_dst_w_dirty(reg, opnd);
+}
+
 static unsigned fp_type_to_vec_size(unsigned type)
 {
     return type == 3 ? 1 : type == 0 ? 2 : 3;
@@ -6033,15 +6070,7 @@ static bool trans_ADD_i(DisasContext* s)
             break;
     }
 
-    if (a->rd != 31 && arm_la_map[a->rd] >= 0 && clearGprHigh) {
-        set_w_write_flag(a->rd, a->sf);
-    } else {
-        if (!a->sf) {
-            la_bstrpick_d(reg_d, reg_d, 31, 0);
-        }
-    }
-
-    store_gpr_dst(a->rd, reg_d);
+    store_gpr_dst_reg_width(a->rd, reg_d, a->sf);
     free_alloc_gpr(temp);
     free_alloc_gpr(reg_d);
     free_alloc_gpr(reg_n);
@@ -6763,6 +6792,13 @@ static bool trans_EXTR(DisasContext* s)
 
     if (unlikely(a->imm == 0)) {
         la_or(reg_d, reg_m, zero_ir2_opnd);
+    } else if (a->rn == a->rm) {
+        if (!a->sf) {
+            lsassert(a->imm <= 31);
+            la_rotri_w(reg_d, reg_m, a->imm);
+        } else {
+            la_rotri_d(reg_d, reg_m, a->imm);
+        }
     } else {
         if (!a->sf) {
             la_srli_w(temp, reg_m, a->imm);
@@ -6826,9 +6862,6 @@ static void shift_reg_imm(IR2_OPND* dst, IR2_OPND* src, int sf,
             break;
     }
 
-    if (!sf) { /* zero extend final result */
-        la_bstrpick_d(*dst, *dst, 31, 0);
-    }
 }
 
 /* Logical (shifted register)
@@ -6875,15 +6908,7 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
             la_or(reg_d, zero_ir2_opnd, reg_m);
         }
 
-        if (rd != 31 && arm_la_map[rd] >= 0 && clearGprHigh) {
-            set_w_write_flag(rd, sf);
-        } else {
-            if (!sf) {
-                la_bstrpick_d(reg_d, reg_d, 31, 0);
-            }
-        }
-
-        store_gpr_dst(rd, reg_d);
+        store_gpr_dst_reg_width(rd, reg_d, sf);
         free_alloc_gpr(reg_d);
         free_alloc_gpr(reg_m);
         return;
@@ -6984,15 +7009,7 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
         }
     }
 
-    if (rd != 31 && arm_la_map[rd] >= 0 && clearGprHigh) {
-        set_w_write_flag(rd, sf);
-    } else {
-        if (!sf) {
-            la_bstrpick_d(reg_d, reg_d, 31, 0);
-        }
-    }
-
-    store_gpr_dst(rd, reg_d);
+    store_gpr_dst_reg_width(rd, reg_d, sf);
     free_alloc_gpr(reg_d);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(reg_m);
@@ -7181,15 +7198,7 @@ static void disas_add_sub_reg(DisasContext* s, uint32_t insn)
         gen_add_sub_reg_result(setflags, sub_op, sf, &reg_d, &reg_n, &reg_m);
     }
 
-    if (rd != 31 && arm_la_map[rd] >= 0 && clearGprHigh) {
-        set_w_write_flag(rd, sf);
-    } else {
-        if (!sf) {
-            la_bstrpick_d(reg_d, reg_d, 31, 0);
-        }
-    }
-
-    store_gpr_dst(rd, reg_d);
+    store_gpr_dst_reg_width(rd, reg_d, sf);
     free_alloc_gpr(reg_d);
     free_alloc_gpr(reg_m);
     free_alloc_gpr(reg_n);
