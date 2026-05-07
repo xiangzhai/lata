@@ -1966,6 +1966,28 @@ bool lata_df_reg_high_live_after_write(unsigned reg)
     return (df[index].gpr_x_live_after & (1u << reg)) != 0;
 }
 
+bool lata_df_reg_live_after(unsigned reg)
+{
+    TranslationBlock *tb = active_df.tb;
+    uint32_t index = active_df.next_index;
+    LataIR1DF *df;
+
+    if (!option_lata_dataflow_opt || !tb || reg >= 31) {
+        return true;
+    }
+    if (tb->lata_df_helper_boundary || tb->lata_df_state_boundary) {
+        return true;
+    }
+    if (index >= tb->icount || index >= TCG_MAX_INSNS) {
+        return true;
+    }
+    df = tb->lata_df_ir1;
+    if (!df) {
+        return true;
+    }
+    return (df[index].gpr_live_after & (1u << reg)) != 0;
+}
+
 bool lata_df_vec_high_live_after_write(unsigned reg, unsigned size)
 {
     TranslationBlock *tb = active_df.tb;

@@ -43,6 +43,7 @@ void lata_df_begin_translate(TranslationBlock *tb);
 void lata_df_end_translate(void);
 void lata_df_advance_insn(void);
 void lata_df_mark_helper_boundary(void);
+bool lata_df_reg_live_after(unsigned reg);
 bool lata_df_reg_high_live_after_write(unsigned reg);
 bool lata_df_vec_high_live_after_write(unsigned reg, unsigned size);
 bool lata_df_vec_high_local_live_after_write(unsigned reg, unsigned size);

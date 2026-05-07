@@ -107,6 +107,7 @@ static void pattern_goto_tb(DisasContext *s, int n, int64_t diff)
     IR2_OPND ir2_opnd_addr;
     TranslationBlock *tb = lsenv->tr_data->curr_tb;
 
+    lata_gpr_cache_flush_all();
     la_label(goto_label);
     tb->jmp_reset_offset[n] = ir2_opnd_label_id(&goto_label);
     ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, B_STUB_SIZE >> 2);
@@ -230,6 +231,7 @@ static void trans_CMPI_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
             }
         }
     }
+    lata_vec_materialize_all_dirty();
 
     nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 0);
     pattern_goto_tb(s, 0, 4);
@@ -321,6 +323,7 @@ static void trans_CMPE_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
             }
         }
     }
+    lata_vec_materialize_all_dirty();
     nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 0);
     pattern_goto_tb(s, 0, 4);
     la_label(label);
@@ -413,6 +416,7 @@ static void trans_CMPS_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
                 }
             }
         }
+        lata_vec_materialize_all_dirty();
         nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 0);
         pattern_goto_tb(s, 0, 4);
         la_label(label);
@@ -437,6 +441,7 @@ static void trans_CMPS_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
                 }
             }
         }
+        lata_vec_materialize_all_dirty();
         nzcv_calculate_if_live(s, temp_n, reg_m, reg_n, sf, 0);
         pattern_goto_tb(s, 0, 4);
         la_label(label);

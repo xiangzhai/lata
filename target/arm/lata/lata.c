@@ -182,6 +182,98 @@ uint64_t context_switch_bt_to_native;
 uint64_t context_switch_native_to_bt_ret_0;
 uint64_t context_switch_native_to_bt;
 
+static int lata_gpr_cache_find(int guest_reg)
+{
+    if (!lsenv || !lsenv->tr_data) {
+        return -1;
+    }
+
+    for (int i = 0; i < LATA_GPR_CACHE_MAX; i++) {
+        if (lsenv->tr_data->gpr_cache[i].valid &&
+            lsenv->tr_data->gpr_cache[i].guest_reg == guest_reg) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int lata_gpr_cache_find_host(int host_reg)
+{
+    if (!lsenv || !lsenv->tr_data) {
+        return -1;
+    }
+
+    for (int i = 0; i < LATA_GPR_CACHE_MAX; i++) {
+        if (lsenv->tr_data->gpr_cache[i].valid &&
+            lsenv->tr_data->gpr_cache[i].host_reg == host_reg) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static IR2_OPND lata_gpr_cache_opnd(int index)
+{
+    return ir2_opnd_new(IR2_OPND_GPR,
+                        lsenv->tr_data->gpr_cache[index].host_reg);
+}
+
+static void lata_gpr_cache_invalidate_slot(int index)
+{
+    IR2_OPND opnd;
+
+    if (index < 0 || index >= LATA_GPR_CACHE_MAX ||
+        !lsenv->tr_data->gpr_cache[index].valid) {
+        return;
+    }
+
+    opnd = lata_gpr_cache_opnd(index);
+    memset(&lsenv->tr_data->gpr_cache[index], 0,
+           sizeof(lsenv->tr_data->gpr_cache[index]));
+    free_alloc_gpr(opnd);
+}
+
+static void lata_gpr_cache_flush_slot(int index)
+{
+    if (index < 0 || index >= LATA_GPR_CACHE_MAX ||
+        !lsenv->tr_data->gpr_cache[index].valid) {
+        return;
+    }
+
+    lata_gpr_cache_invalidate_slot(index);
+}
+
+static int lata_gpr_cache_alloc_slot(int guest_reg, bool load_old)
+{
+    IR2_OPND opnd;
+
+    if (!option_lata_dataflow_opt || !lsenv || !lsenv->tr_data ||
+        guest_reg < 0 || guest_reg >= 31 || arm_la_map[guest_reg] >= 0) {
+        return -1;
+    }
+
+    for (int i = 0; i < LATA_GPR_CACHE_MAX; i++) {
+        if (!lsenv->tr_data->gpr_cache[i].valid) {
+            opnd = ra_alloc_itemp();
+            if (ir2_opnd_base_reg_num(&opnd) == la_a0) {
+                ra_free_temp(opnd);
+                return -1;
+            }
+
+            lsenv->tr_data->gpr_cache[i].guest_reg = guest_reg;
+            lsenv->tr_data->gpr_cache[i].host_reg =
+                ir2_opnd_base_reg_num(&opnd);
+            lsenv->tr_data->gpr_cache[i].valid = true;
+            if (load_old) {
+                la_ld_d(opnd, env_ir2_opnd, env_offset_gpr(guest_reg));
+            }
+            return i;
+        }
+    }
+
+    return -1;
+}
+
 static void global_register_init(void)
 {
     env_ir2_opnd = INIT_RA(IR2_OPND_GPR, reg_statics_map[S_ENV]);
@@ -258,6 +350,7 @@ void tr_init(void* tb)
     t->curr_tb = tb;
     /* register allocation init */
     ra_free_all();
+    lata_gpr_cache_reset();
 
     /* reset ir2 array */
     if (t->ir2_inst_array == NULL) {
@@ -293,6 +386,79 @@ void tr_fini(void)
 
     /* label number */
     t->label_num = 0;
+}
+
+void lata_gpr_cache_reset(void)
+{
+    if (!lsenv || !lsenv->tr_data) {
+        return;
+    }
+    memset(lsenv->tr_data->gpr_cache, 0, sizeof(lsenv->tr_data->gpr_cache));
+}
+
+void lata_gpr_cache_flush_all(void)
+{
+    if (!lsenv || !lsenv->tr_data) {
+        return;
+    }
+
+    for (int i = 0; i < LATA_GPR_CACHE_MAX; i++) {
+        lata_gpr_cache_flush_slot(i);
+    }
+}
+
+void lata_gpr_cache_end_insn(void)
+{
+    if (!lsenv || !lsenv->tr_data) {
+        return;
+    }
+
+    for (int i = 0; i < LATA_GPR_CACHE_MAX; i++) {
+        int guest_reg;
+
+        if (!lsenv->tr_data->gpr_cache[i].valid) {
+            continue;
+        }
+
+        guest_reg = lsenv->tr_data->gpr_cache[i].guest_reg;
+        if (!lata_df_reg_live_after(guest_reg)) {
+            lata_gpr_cache_invalidate_slot(i);
+        }
+    }
+}
+
+bool lata_gpr_cache_owns_opnd(IR2_OPND opnd)
+{
+    if (!ir2_opnd_is_ireg(&opnd)) {
+        return false;
+    }
+    return lata_gpr_cache_find_host(ir2_opnd_base_reg_num(&opnd)) >= 0;
+}
+
+bool lata_gpr_cache_adopt_clean(int i, IR2_OPND opnd)
+{
+    int host_reg;
+
+    if (!option_lata_dataflow_opt || !lsenv || !lsenv->tr_data || i < 0 || i >= 31 ||
+        arm_la_map[i] >= 0 || !ir2_opnd_is_itemp(&opnd)) {
+        return false;
+    }
+
+    host_reg = ir2_opnd_base_reg_num(&opnd);
+    if (host_reg == la_a0 || lata_gpr_cache_find_host(host_reg) >= 0) {
+        return false;
+    }
+
+    for (int slot = 0; slot < LATA_GPR_CACHE_MAX; slot++) {
+        if (!lsenv->tr_data->gpr_cache[slot].valid) {
+            lsenv->tr_data->gpr_cache[slot].guest_reg = i;
+            lsenv->tr_data->gpr_cache[slot].host_reg = host_reg;
+            lsenv->tr_data->gpr_cache[slot].valid = true;
+            return true;
+        }
+    }
+
+    return false;
 }
 
 #define EXTRA_SPACE             40
@@ -643,6 +809,8 @@ int tr_ir2_assemble(const void *code_start_addr)
 
 static void lata_flush_writes_before_helper(void)
 {
+    lata_gpr_cache_flush_all();
+
     if (!lsenv || !lsenv->tr_data || !lsenv->tr_data->w_write_flag) {
         return;
     }
@@ -1214,9 +1382,9 @@ TranslationBlock *lata_fam_lookup_tb(CPUArchState *env, uint64_t pc,
     return tb->tc.ptr ? tb : NULL;
 }
 
-/* gpr同时为src和dst, 使用alloc_gpr_src,并且需要store回去 */
-IR2_OPND alloc_gpr_src(int i) {
-    if(i==31){
+static IR2_OPND alloc_gpr_src_uncached(int i, bool sp)
+{
+    if (!sp && i == 31) {
         return ir2_opnd_new(IR2_OPND_GPR, la_zero);
     }
     if (arm_la_map[i] >= 0) {
@@ -1228,38 +1396,87 @@ IR2_OPND alloc_gpr_src(int i) {
     }
 }
 
-IR2_OPND alloc_gpr_src_sp(int i) {
+static IR2_OPND alloc_gpr_src_cached(int i, bool sp)
+{
+    int index;
+
+    if (!sp && i == 31) {
+        return ir2_opnd_new(IR2_OPND_GPR, la_zero);
+    }
     if (arm_la_map[i] >= 0) {
         return ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]);
     } else {
-        IR2_OPND t = ra_alloc_itemp();
-        la_ld_d(t, env_ir2_opnd, env_offset_gpr(i));
-        return t;
+        index = lata_gpr_cache_find(i);
+        if (index >= 0) {
+            return lata_gpr_cache_opnd(index);
+        }
+        index = lata_gpr_cache_alloc_slot(i, true);
+        if (index >= 0) {
+            return lata_gpr_cache_opnd(index);
+        }
+        return alloc_gpr_src_uncached(i, sp);
     }
+}
+
+/* gpr同时为src和dst, 使用alloc_gpr_src,并且需要store回去 */
+IR2_OPND alloc_gpr_src(int i)
+{
+    return alloc_gpr_src_uncached(i, false);
+}
+
+IR2_OPND alloc_gpr_src_sp(int i)
+{
+    return alloc_gpr_src_uncached(i, true);
+}
+
+IR2_OPND alloc_gpr_src_ro(int i)
+{
+    return alloc_gpr_src_cached(i, false);
+}
+
+IR2_OPND alloc_gpr_src_sp_ro(int i)
+{
+    return alloc_gpr_src_cached(i, true);
 }
 
 IR2_OPND alloc_gpr_dst(int i) {
+    int index;
+
     if(i==31){
         return ir2_opnd_new(IR2_OPND_GPR, la_zero);
     }
     if (arm_la_map[i] >= 0) {
         return ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]);
     } else {
+        index = lata_gpr_cache_find(i);
+        if (index >= 0) {
+            lata_gpr_cache_invalidate_slot(index);
+        }
         return ra_alloc_itemp();
     }
 }
 
 IR2_OPND alloc_gpr_dst_sp(int i) {
+    int index;
+
     if (arm_la_map[i] >= 0) {
         return ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]);
     } else {
+        index = lata_gpr_cache_find(i);
+        if (index >= 0) {
+            lata_gpr_cache_invalidate_slot(index);
+        }
         return ra_alloc_itemp();
     }
 }
 
 /* la_zero作为目的寄存器不需要写回 */
 void store_gpr_dst(int i, IR2_OPND opnd) {
-    if (arm_la_map[i] < 0 && opnd.val != 0) {
+    if (arm_la_map[i] < 0 && ir2_opnd_base_reg_num(&opnd) != 0) {
+        int index = lata_gpr_cache_find(i);
+        if (index >= 0) {
+            lata_gpr_cache_invalidate_slot(index);
+        }
         la_st_d(opnd, env_ir2_opnd, env_offset_gpr(i));
     }   
 }
@@ -1267,6 +1484,10 @@ void store_gpr_dst(int i, IR2_OPND opnd) {
 /* la_zero写回 */
 void store_gpr_zero(int i) {
     if (arm_la_map[i] < 0) {
+        int index = lata_gpr_cache_find(i);
+        if (index >= 0) {
+            lata_gpr_cache_invalidate_slot(index);
+        }
         la_st_d(zero_ir2_opnd, env_ir2_opnd, env_offset_gpr(i));
     }else{
         IR2_OPND reg_d = alloc_gpr_dst(i);
@@ -1277,8 +1498,21 @@ void store_gpr_zero(int i) {
 
 /* la_zero不会被映射，但也不是临时寄存器 */
 void free_alloc_gpr(IR2_OPND opnd) {
-    if (arm_la_reverse_map[opnd.val] == -1 && opnd.val != 0) {
-        ra_free_temp(opnd);
+    int virt_id;
+    int reg_num;
+
+    if (lata_gpr_cache_owns_opnd(opnd)) {
+        return;
+    }
+    reg_num = ir2_opnd_base_reg_num(&opnd);
+    if (reg_num == 0 || arm_la_reverse_map[reg_num] != -1) {
+        return;
+    }
+    if (ir2_opnd_is_itemp(&opnd)) {
+        virt_id = reg_itemp_reverse_map[reg_num];
+        if (virt_id >= 0 && (lsenv->tr_data->itemp_status & (1u << virt_id))) {
+            lsenv->tr_data->itemp_status &= ~(1u << virt_id);
+        }
     }
 }
 

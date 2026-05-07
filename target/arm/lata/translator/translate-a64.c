@@ -395,11 +395,13 @@ static void store_gpr_dst_w_dirty(int reg, IR2_OPND opnd)
 
     if (clearGprHigh && !lata_df_reg_high_live_after_write(reg)) {
         store_gpr_dst(reg, opnd);
+        lata_gpr_cache_adopt_clean(reg, opnd);
         return;
     }
 
     la_bstrpick_d(opnd, opnd, 31, 0);
     store_gpr_dst(reg, opnd);
+    lata_gpr_cache_adopt_clean(reg, opnd);
 }
 
 static void store_gpr_dst_reg_width(int reg, IR2_OPND opnd, bool is_64bit)
@@ -409,6 +411,7 @@ static void store_gpr_dst_reg_width(int reg, IR2_OPND opnd, bool is_64bit)
             set_w_write_flag(reg, true);
         }
         store_gpr_dst(reg, opnd);
+        lata_gpr_cache_adopt_clean(reg, opnd);
         return;
     }
 
@@ -1116,7 +1119,6 @@ static void lata_emit_fam_fast_lookup(DisasContext *s, IR2_OPND target_pc,
     IR2_OPND entry = ra_alloc_itemp();
     IR2_OPND host_ptr = ra_alloc_itemp();
     IR2_OPND scratch = ra_alloc_itemp();
-    IR2_OPND cpu_ptr = ra_alloc_itemp();
 
     LATA_FAM_PROFILE_LOOKUP(scratch, fam_kind);
 
@@ -1124,9 +1126,9 @@ static void lata_emit_fam_fast_lookup(DisasContext *s, IR2_OPND target_pc,
         !lata_fam_cflags_supported(tb_cflags(tb))) {
         la_b(unsupported_miss);
     } else {
-        li_d(cpu_ptr, env_offset(lata_cpu_state));
-        la_ldx_d(cpu_ptr, env_ir2_opnd, cpu_ptr);
-        la_ld_wu(scratch, cpu_ptr, offsetof(CPUState, cflags_next_tb));
+        li_d(entry, env_offset(lata_cpu_state));
+        la_ldx_d(entry, env_ir2_opnd, entry);
+        la_ld_wu(scratch, entry, offsetof(CPUState, cflags_next_tb));
         li_d(entry, UINT32_MAX);
         la_bne(scratch, entry, unsupported_miss);
 
@@ -1151,13 +1153,13 @@ static void lata_emit_fam_fast_lookup(DisasContext *s, IR2_OPND target_pc,
         la_bne(host_ptr, target_pc, key_miss);
 
         li_d(scratch, expected_cs_base);
-        la_ld_d(cpu_ptr, entry, offsetof(LataFAMEntry, cs_base));
-        la_bne(cpu_ptr, scratch, key_miss);
+        la_ld_d(host_ptr, entry, offsetof(LataFAMEntry, cs_base));
+        la_bne(host_ptr, scratch, key_miss);
 
         li_d(scratch, (((uint64_t)(tb_cflags(tb) & ~CF_INVALID)) << 32) |
               tb->flags);
-        la_ld_d(cpu_ptr, entry, offsetof(LataFAMEntry, flags_cflags));
-        la_bne(cpu_ptr, scratch, key_miss);
+        la_ld_d(host_ptr, entry, offsetof(LataFAMEntry, flags_cflags));
+        la_bne(host_ptr, scratch, key_miss);
 
         la_ld_d(host_ptr, entry, offsetof(LataFAMEntry, host_ptr));
         la_beqz(host_ptr, invalid_miss);
@@ -1188,7 +1190,6 @@ static void lata_emit_fam_fast_lookup(DisasContext *s, IR2_OPND target_pc,
     la_label(miss);
     LATA_FAM_PROFILE_MISS(scratch, fam_kind);
 
-    free_alloc_gpr(cpu_ptr);
     free_alloc_gpr(scratch);
     free_alloc_gpr(host_ptr);
     free_alloc_gpr(entry);
@@ -1217,6 +1218,7 @@ static void gen_goto_tb_indirect_kind(DisasContext* s, uint32_t rn,
         lata_fam_expected_indirect_cs_base(s, fam_kind, rn);
 
     lata_clean_pc_tbi(s, target_pc, reg_n);
+    lata_gpr_cache_flush_all();
     lata_emit_fam_lookup(s, target_pc, fam_kind, expected_cs_base);
 
     la_st_d(target_pc, env_ir2_opnd, env_offset_pc());
@@ -1246,6 +1248,7 @@ static void gen_goto_tb_indirect_blr(DisasContext* s, IR2_OPND reg_n,
         lata_fam_expected_indirect_cs_base(s, fam_kind, 0);
 
     lata_clean_pc_tbi(s, target_pc, reg_n);
+    lata_gpr_cache_flush_all();
     lata_emit_fam_lookup(s, target_pc, fam_kind, expected_cs_base);
 
     la_st_d(target_pc, env_ir2_opnd, env_offset_pc());
@@ -1715,12 +1718,13 @@ static bool trans_CBZ(DisasContext* s)
         }
     }
 
-    IR2_OPND reg_t = alloc_gpr_src(a->rt);
+    IR2_OPND reg_t = alloc_gpr_src_ro(a->rt);
     IR2_OPND label = ir2_opnd_new_type(IR2_OPND_LABEL);
     IR2_OPND temp;
 
     lata_reset_btype(s);
 
+    lata_vec_materialize_all_dirty();
     if (a->sf) {
         if (a->nz) { // CBNZ
             la_bnez(reg_t, label);
@@ -1758,13 +1762,14 @@ static bool trans_TBZ(DisasContext* s)
         }
     }
 
-    IR2_OPND reg_t = alloc_gpr_src(a->rt);
+    IR2_OPND reg_t = alloc_gpr_src_ro(a->rt);
     IR2_OPND label = ir2_opnd_new_type(IR2_OPND_LABEL);
     IR2_OPND temp = ra_alloc_itemp();
 
     lata_reset_btype(s);
 
     la_bstrpick_d(temp, reg_t, a->bitpos, a->bitpos);
+    lata_vec_materialize_all_dirty();
     if (a->nz) { // TBNZ
         la_bnez(temp, label);
     } else { // TBZ
@@ -1798,6 +1803,7 @@ static bool trans_B_cond(DisasContext* s)
         IR2_OPND label = ir2_opnd_new_type(IR2_OPND_LABEL);
         IR2_OPND reg_t = ra_alloc_itemp();
         la_setarmj(reg_t, a->cond);
+        lata_vec_materialize_all_dirty();
 #ifdef CONFIG_LATA_TU
         TranslationBlock *tb = lsenv->tr_data->curr_tb;
         if (tu_has_both_cond_edges(tb)) {
@@ -6120,14 +6126,7 @@ static bool trans_SUB_i(DisasContext* s)
             break;
     }
 
-    if (a->rd != 31 && arm_la_map[a->rd] >= 0 && clearGprHigh) {
-        set_w_write_flag(a->rd, a->sf);
-    } else {
-        if (!a->sf) {
-            la_bstrpick_d(reg_d, reg_d, 31, 0);
-        }
-    }
-    store_gpr_dst(a->rd, reg_d);
+    store_gpr_dst_reg_width(a->rd, reg_d, a->sf);
     free_alloc_gpr(reg_d);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(temp);
@@ -6162,15 +6161,7 @@ static bool trans_ADDS_i(DisasContext* s)
     gen_add_CC(&reg_n, &temp, a->sf);
     gen_add(&reg_d, &reg_n, &temp, a->sf);
 
-    if (a->rd != 31 && arm_la_map[a->rd] >= 0 && clearGprHigh) {
-        set_w_write_flag(a->rd, a->sf);
-    } else {
-        if (!a->sf) {
-            la_bstrpick_d(reg_d, reg_d, 31, 0);
-        }
-    }
-
-    store_gpr_dst(a->rd, reg_d);
+    store_gpr_dst_reg_width(a->rd, reg_d, a->sf);
     free_alloc_gpr(reg_d);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(temp);
@@ -6205,15 +6196,7 @@ static bool trans_SUBS_i(DisasContext* s)
     gen_sub_CC(&reg_n, &temp, a->sf);
     gen_sub(&reg_d, &reg_n, &temp, a->sf);
 
-    if (a->rd != 31 && arm_la_map[a->rd] >= 0 && clearGprHigh) {
-        set_w_write_flag(a->rd, a->sf);
-    } else {
-        if (!a->sf) {
-            la_bstrpick_d(reg_d, reg_d, 31, 0);
-        }
-    }
-
-    store_gpr_dst(a->rd, reg_d);
+    store_gpr_dst_reg_width(a->rd, reg_d, a->sf);
     free_alloc_gpr(reg_d);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(temp);
@@ -6336,7 +6319,7 @@ static bool trans_AND_i(DisasContext* s)
     }
 
     IR2_OPND reg_d = alloc_gpr_dst_sp(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(a->rn);
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
         clear_gpr_high(a->rn);
@@ -6351,15 +6334,7 @@ static bool trans_AND_i(DisasContext* s)
         la_andi(reg_d, reg_n, imm);
     }
 
-    if (a->rd != 31 && arm_la_map[a->rd] >= 0 && clearGprHigh) {
-        set_w_write_flag(a->rd, a->sf);
-    } else {
-        if (!a->sf) {
-            la_bstrpick_d(reg_d, reg_d, 31, 0);
-        }
-    }
-
-    store_gpr_dst(a->rd, reg_d);
+    store_gpr_dst_reg_width(a->rd, reg_d, a->sf);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(reg_d);
     return true;
@@ -6381,7 +6356,7 @@ static bool trans_ORR_i(DisasContext* s)
     }
 
     IR2_OPND reg_d = alloc_gpr_dst_sp(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(a->rn);
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
         clear_gpr_high(a->rn);
@@ -6396,15 +6371,7 @@ static bool trans_ORR_i(DisasContext* s)
         la_ori(reg_d, reg_n, imm);
     }
 
-    if (a->rd != 31 && arm_la_map[a->rd] >= 0 && clearGprHigh) {
-        set_w_write_flag(a->rd, a->sf);
-    } else {
-        if (!a->sf) {
-            la_bstrpick_d(reg_d, reg_d, 31, 0);
-        }
-    }
-
-    store_gpr_dst(a->rd, reg_d);
+    store_gpr_dst_reg_width(a->rd, reg_d, a->sf);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(reg_d);
     return true;
@@ -6426,7 +6393,7 @@ static bool trans_EOR_i(DisasContext* s)
     }
 
     IR2_OPND reg_d = alloc_gpr_dst_sp(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(a->rn);
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
         clear_gpr_high(a->rn);
@@ -6441,15 +6408,7 @@ static bool trans_EOR_i(DisasContext* s)
         la_xori(reg_d, reg_n, imm);
     }
 
-    if (a->rd != 31 && arm_la_map[a->rd] >= 0 && clearGprHigh) {
-        set_w_write_flag(a->rd, a->sf);
-    } else {
-        if (!a->sf) {
-            la_bstrpick_d(reg_d, reg_d, 31, 0);
-        }
-    }
-
-    store_gpr_dst(a->rd, reg_d);
+    store_gpr_dst_reg_width(a->rd, reg_d, a->sf);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(reg_d);
     return true;
@@ -6471,7 +6430,7 @@ static bool trans_ANDS_i(DisasContext* s)
     }
 
     IR2_OPND reg_d = alloc_gpr_dst(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(a->rn);
     IR2_OPND temp = ra_alloc_itemp();
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
@@ -6486,15 +6445,7 @@ static bool trans_ANDS_i(DisasContext* s)
         la_x86and_d(reg_n, temp);
     }
 
-    if (a->rd != 31 && arm_la_map[a->rd] >= 0 && clearGprHigh) {
-        set_w_write_flag(a->rd, a->sf);
-    } else {
-        if (!a->sf) {
-            la_bstrpick_d(reg_d, reg_d, 31, 0);
-        }
-    }
-
-    store_gpr_dst(a->rd, reg_d);
+    store_gpr_dst_reg_width(a->rd, reg_d, a->sf);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(reg_d);
     free_alloc_gpr(temp);
@@ -6607,7 +6558,7 @@ static bool trans_SBFM(DisasContext* s)
     unsigned int si = a->imms;
 
     IR2_OPND reg_d = alloc_gpr_dst(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(a->rn);
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
         clear_gpr_high(a->rn);
@@ -6666,7 +6617,7 @@ static bool trans_UBFM(DisasContext* s)
     unsigned int si = a->imms;
 
     IR2_OPND reg_d = alloc_gpr_dst(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(a->rn);
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
         clear_gpr_high(a->rn);
     }
@@ -6717,7 +6668,7 @@ static bool trans_BFM(DisasContext* s)
     unsigned int si = a->imms;
 
     IR2_OPND reg_d = alloc_gpr_src(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(a->rn);
     IR2_OPND temp;
     if (clearGprHigh && a->sf && arm_la_map[a->rd] >= 0 && a->rd != 31) {
         clear_gpr_high(a->rd);
@@ -6779,8 +6730,8 @@ static bool trans_EXTR(DisasContext* s)
 {
     arg_extract* a = &(s->arg.f_extract);
     IR2_OPND reg_d = alloc_gpr_dst(a->rd);
-    IR2_OPND reg_m = alloc_gpr_src(a->rm);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
+    IR2_OPND reg_m = alloc_gpr_src_ro(a->rm);
+    IR2_OPND reg_n = alloc_gpr_src_ro(a->rn);
     IR2_OPND temp = ra_alloc_itemp();
 
     if (clearGprHigh && a->sf && arm_la_map[a->rm] >= 0 && a->rm != 31) {
@@ -6889,7 +6840,7 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
     }
 
     IR2_OPND reg_d = alloc_gpr_dst(rd);
-    IR2_OPND reg_m = alloc_gpr_src(rm);
+    IR2_OPND reg_m = alloc_gpr_src_ro(rm);
 
     if (clearGprHigh && sf && arm_la_map[rm] >= 0 && rm != 31) {
         clear_gpr_high(rm);
@@ -6914,7 +6865,7 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
         return;
     }
 
-    IR2_OPND reg_n = alloc_gpr_src(rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(rn);
     IR2_OPND temp = ra_alloc_itemp();
 
     if (clearGprHigh && sf && arm_la_map[rn] >= 0 && rn != 31) {
@@ -7070,8 +7021,8 @@ static void disas_add_sub_ext_reg(DisasContext* s, uint32_t insn)
     }
 
     IR2_OPND reg_d;
-    IR2_OPND reg_n = alloc_gpr_src_sp(rn);
-    IR2_OPND reg_m = alloc_gpr_src(rm);
+    IR2_OPND reg_n = alloc_gpr_src_sp_ro(rn);
+    IR2_OPND reg_m = alloc_gpr_src_ro(rm);
     IR2_OPND temp = ra_alloc_itemp();
 
     if (clearGprHigh && sf && arm_la_map[rn] >= 0) {
@@ -7179,8 +7130,8 @@ static void disas_add_sub_reg(DisasContext* s, uint32_t insn)
     }
 
     IR2_OPND reg_d = alloc_gpr_dst(rd);
-    IR2_OPND reg_n = alloc_gpr_src(rn);
-    IR2_OPND reg_m = alloc_gpr_src(rm);
+    IR2_OPND reg_n = alloc_gpr_src_ro(rn);
+    IR2_OPND reg_m = alloc_gpr_src_ro(rm);
 
     if (clearGprHigh && sf && arm_la_map[rn] >= 0 && rn != 31) {
         clear_gpr_high(rn);
@@ -7372,8 +7323,8 @@ static void disas_adc_sbc(DisasContext* s, uint32_t insn)
     rn = extract32(insn, 5, 5);
     rd = extract32(insn, 0, 5);
 
-    IR2_OPND reg_n = alloc_gpr_src(rn);
-    IR2_OPND reg_m = alloc_gpr_src(rm);
+    IR2_OPND reg_n = alloc_gpr_src_ro(rn);
+    IR2_OPND reg_m = alloc_gpr_src_ro(rm);
     IR2_OPND reg_d = alloc_gpr_dst(rd);
     IR2_OPND temp = ra_alloc_itemp();
     IR2_OPND temp2 = ra_alloc_itemp();
@@ -7461,7 +7412,7 @@ static void disas_evaluate_into_flags(DisasContext* s, uint32_t insn)
     int bit_v_hi = sz ? 16 : 8;
     int low_msb = sz ? 15 : 7;
 
-    IR2_OPND reg_n = alloc_gpr_src(rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(rn);
     IR2_OPND n = ra_alloc_itemp();
     IR2_OPND z = ra_alloc_itemp();
     IR2_OPND v = ra_alloc_itemp();
@@ -7525,7 +7476,7 @@ static void disas_cc(DisasContext* s, uint32_t insn)
     rn = extract32(insn, 5, 5);
     nzcv = extract32(insn, 0, 4);
 
-    IR2_OPND reg_n = alloc_gpr_src(rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(rn);
     IR2_OPND reg_m;
     IR2_OPND temp = ra_alloc_itemp();
     IR2_OPND label_false = ir2_opnd_new_type(IR2_OPND_LABEL);
@@ -7670,7 +7621,7 @@ static void handle_clz(DisasContext* s, unsigned int sf,
     unsigned int rn, unsigned int rd)
 {
     IR2_OPND reg_d = alloc_gpr_dst(rd);
-    IR2_OPND reg_n = alloc_gpr_src(rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(rn);
     if (clearGprHigh && sf && arm_la_map[rn] >= 0 && rn != 31) {
         clear_gpr_high(rn);
     }
@@ -7694,7 +7645,7 @@ static void handle_cls(DisasContext* s, unsigned int sf,
     unsigned int rn, unsigned int rd)
 {
     IR2_OPND reg_d = alloc_gpr_dst(rd);
-    IR2_OPND reg_n = alloc_gpr_src(rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(rn);
     IR2_OPND temp_cls = ra_alloc_itemp();
     IR2_OPND zero_label = ir2_opnd_new_type(IR2_OPND_LABEL);
     IR2_OPND exit_label = ir2_opnd_new_type(IR2_OPND_LABEL);
@@ -7920,8 +7871,8 @@ static void handle_div(DisasContext* s, bool is_signed, unsigned int sf,
     unsigned int rm, unsigned int rn, unsigned int rd)
 {
     IR2_OPND reg_d = alloc_gpr_dst(rd);
-    IR2_OPND reg_n = alloc_gpr_src(rn);
-    IR2_OPND reg_m = alloc_gpr_src(rm);
+    IR2_OPND reg_n = alloc_gpr_src_ro(rn);
+    IR2_OPND reg_m = alloc_gpr_src_ro(rm);
     IR2_OPND temp_m = ra_alloc_itemp();
     IR2_OPND temp_n = ra_alloc_itemp();
     if (clearGprHigh && sf && arm_la_map[rn] >= 0 && rn != 31) {
@@ -7972,8 +7923,8 @@ static void handle_shift_reg(DisasContext* s,
     unsigned int rm, unsigned int rn, unsigned int rd)
 {
     IR2_OPND reg_d = alloc_gpr_dst(rd);
-    IR2_OPND reg_n = alloc_gpr_src(rn);
-    IR2_OPND reg_m = alloc_gpr_src(rm);
+    IR2_OPND reg_n = alloc_gpr_src_ro(rn);
+    IR2_OPND reg_m = alloc_gpr_src_ro(rm);
     if (clearGprHigh && sf && arm_la_map[rn] >= 0 && rn != 31) {
         clear_gpr_high(rn);
     }
@@ -10203,6 +10154,7 @@ static void handle_fpfpcvt(DisasContext* s, int rd, int rn, int opcode,
                     la_stx_w(a0_ir2_opnd, env_ir2_opnd, temp);
                 }
             }
+            free_alloc_gpr(reg_d);
 
             /* set rmode */
             li_d(a6_ir2_opnd, env_offset_FPSCR());
@@ -10212,6 +10164,7 @@ static void handle_fpfpcvt(DisasContext* s, int rd, int rn, int opcode,
             la_stx_w(a7_ir2_opnd, env_ir2_opnd, a6_ir2_opnd);
 
             lata_gen_call_helper_epilogue(tcg_ctx);
+            reg_d = alloc_gpr_dst(rd);
             if (rd != 31) {
                 li_d(temp, env_offset_gpr(rd));
                 if (sf) {
@@ -10474,7 +10427,9 @@ static void handle_fjcvtzs(DisasContext* s, int rd, int rn)
         li_d(tmp, env_offset_gpr(rd));
         la_stx_w(a0_ir2_opnd, env_ir2_opnd, tmp);
     }
+    free_alloc_gpr(reg_d);
     lata_gen_call_helper_epilogue_no_flags(tcg_ctx);
+    reg_d = alloc_gpr_dst(rd);
     if (rd != 31) {
         li_d(tmp, env_offset_gpr(rd));
         la_ldx_wu(reg_d, env_ir2_opnd, tmp);
@@ -22268,6 +22223,8 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
         if (i == ir1_nr - 2 && insts_pattern(pir1, pir1 + 1)) {
             tcg_ctx->gen_insn_end_off[i] = (lsenv->tr_data->real_ir2_inst_num) << 2;
             tcg_ctx->gen_insn_data[i * TARGET_INSN_START_WORDS] = pir1->pc_curr;
+            lata_gpr_cache_end_insn();
+            lata_df_advance_insn();
             last_is_jmp = DISAS_NORETURN;
             pir1 += 1; // update true pir1 for tb stop check
             break;
@@ -22286,6 +22243,7 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
             lata_reset_btype(pir1);
         }
         last_is_jmp = pir1->base->is_jmp;
+        lata_gpr_cache_end_insn();
         lata_df_advance_insn();
 #ifndef CONFIG_LATA_TU
         tcg_ctx->gen_insn_end_off[i] = (lsenv->tr_data->real_ir2_inst_num) << 2;

@@ -15,6 +15,7 @@
 //#include "env.h"
 
 #define B_STUB_SIZE 12
+#define LATA_GPR_CACHE_MAX 3
 
 typedef enum LataFAMMode {
     LATA_FAM_OFF = -1,
@@ -84,6 +85,12 @@ typedef struct TRANSLATION_DATA {
         };
     };
 
+    struct {
+        uint8_t guest_reg;
+        uint8_t host_reg;
+        bool valid;
+    } gpr_cache[LATA_GPR_CACHE_MAX];
+
     /* TODO : support static translation */
     uint8 curr_ir1_skipped_eflags; /* these eflag calculation can be skipped */
                                    /* (because of flag pattern, etc) */
@@ -134,11 +141,19 @@ void lata_gen_call_helper_epilogue_no_flags(TCGContext *tcg_ctx);
 
 IR2_OPND alloc_gpr_src(int i);
 IR2_OPND alloc_gpr_src_sp(int i);
+/* Read-only source allocators may return a shared clean cache entry. */
+IR2_OPND alloc_gpr_src_ro(int i);
+IR2_OPND alloc_gpr_src_sp_ro(int i);
 IR2_OPND alloc_gpr_dst(int i);
 IR2_OPND alloc_gpr_dst_sp(int i);
 void store_gpr_dst(int i, IR2_OPND opnd);
 void store_gpr_zero(int i);
 void free_alloc_gpr(IR2_OPND opnd);
+void lata_gpr_cache_reset(void);
+void lata_gpr_cache_flush_all(void);
+void lata_gpr_cache_end_insn(void);
+bool lata_gpr_cache_owns_opnd(IR2_OPND opnd);
+bool lata_gpr_cache_adopt_clean(int i, IR2_OPND opnd);
 
 IR2_OPND alloc_fpr_src(int i);
 IR2_OPND alloc_fpr_dst(int i);
