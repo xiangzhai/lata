@@ -399,6 +399,12 @@ void tcg_region_reset_all(void)
     for (i = 0; i < n_ctxs; i++) {
         TCGContext *s = qatomic_read(&tcg_ctxs[i]);
         tcg_region_initial_alloc__locked(s);
+#if defined(CONFIG_SPLIT_TB) || defined(CONFIG_LATA_TU)
+        /* TB metadata is allocated from a separate arena.  Reset it together
+         * with the code regions, otherwise repeated flushes exhaust the arena
+         * and every subsequent allocation loops forever on tb_flush(). */
+        s->tb_gen_head = s->tb_gen_base;
+#endif
     }
     qemu_mutex_unlock(&region.lock);
 
@@ -689,6 +695,7 @@ static bool alloc_tb_gen_head(size_t size)
     /* Request large pages for the buffer.  */
     qemu_madvise(buf, size, QEMU_MADV_HUGEPAGE);
 
+    tcg_ctx->tb_gen_base = buf;
     tcg_ctx->tb_gen_head = buf;
     tcg_ctx->tb_gen_highwater = buf + size - 1024;
     return true;

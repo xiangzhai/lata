@@ -89,6 +89,7 @@ typedef struct TRANSLATION_DATA {
         uint8_t guest_reg;
         uint8_t host_reg;
         bool valid;
+        bool pinned;
     } gpr_cache[LATA_GPR_CACHE_MAX];
 
     /* TODO : support static translation */
@@ -154,6 +155,7 @@ void lata_gpr_cache_flush_all(void);
 void lata_gpr_cache_end_insn(void);
 bool lata_gpr_cache_owns_opnd(IR2_OPND opnd);
 bool lata_gpr_cache_adopt_clean(int i, IR2_OPND opnd);
+bool lata_gpr_cache_reclaim(void);
 
 IR2_OPND alloc_fpr_src(int i);
 IR2_OPND alloc_fpr_dst(int i);

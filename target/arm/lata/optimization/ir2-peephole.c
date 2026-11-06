@@ -788,7 +788,8 @@ static LataPeepholePassResult pass_move_chain(IR2_INST *ir2)
     IR2_OPND *next_src = mov_gpr_src(next);
 
     if (!ir2_opnd_cmp(next_src, &ir2->_opnd[0]) ||
-        ir2_opnd_cmp(&next->_opnd[0], &ir2->_opnd[0])) {
+        ir2_opnd_cmp(&next->_opnd[0], &ir2->_opnd[0]) ||
+        ir2_opnd_cmp(next_src, src)) {
         return LATA_PASS_NO_CHANGE;
     }
 

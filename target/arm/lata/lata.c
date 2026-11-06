@@ -423,8 +423,30 @@ void lata_gpr_cache_end_insn(void)
         guest_reg = lsenv->tr_data->gpr_cache[i].guest_reg;
         if (!lata_df_reg_live_after(guest_reg)) {
             lata_gpr_cache_invalidate_slot(i);
+            continue;
         }
+        lsenv->tr_data->gpr_cache[i].pinned = false;
     }
+}
+
+bool lata_gpr_cache_reclaim(void)
+{
+    bool reclaimed = false;
+
+    if (!lsenv || !lsenv->tr_data) {
+        return false;
+    }
+
+    for (int i = 0; i < LATA_GPR_CACHE_MAX; i++) {
+        if (!lsenv->tr_data->gpr_cache[i].valid ||
+            lsenv->tr_data->gpr_cache[i].pinned) {
+            continue;
+        }
+        lata_gpr_cache_invalidate_slot(i);
+        reclaimed = true;
+    }
+
+    return reclaimed;
 }
 
 bool lata_gpr_cache_owns_opnd(IR2_OPND opnd)
@@ -1407,11 +1429,11 @@ static IR2_OPND alloc_gpr_src_cached(int i, bool sp)
         return ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]);
     } else {
         index = lata_gpr_cache_find(i);
-        if (index >= 0) {
-            return lata_gpr_cache_opnd(index);
+        if (index < 0) {
+            index = lata_gpr_cache_alloc_slot(i, true);
         }
-        index = lata_gpr_cache_alloc_slot(i, true);
         if (index >= 0) {
+            lsenv->tr_data->gpr_cache[index].pinned = true;
             return lata_gpr_cache_opnd(index);
         }
         return alloc_gpr_src_uncached(i, sp);

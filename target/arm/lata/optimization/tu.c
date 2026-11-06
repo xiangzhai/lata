@@ -485,8 +485,11 @@ static inline void get_tu_queue(CPUState *cpu,
             if (!next_tb) {
                 next_tb = tb_create(cpu, ir1_next_pc, direct_cs_base, flags,
                                     cflags, max_insns, false);
-                if (!tu_can_link_to_tb(next_tb)) {
-                    next_tb->s_data->tu_tb_mode = TU_TB_MODE_SWITCH_TO_TB;
+                if (!next_tb || !tu_can_link_to_tb(next_tb)) {
+                    if (next_tb) {
+                        next_tb->s_data->tu_tb_mode =
+                            TU_TB_MODE_SWITCH_TO_TB;
+                    }
                     lata_tu_drop_all_edges(tb,
                         LATA_TU_FALLBACK_TARGET_NOT_TRANSLATABLE);
                     break;
@@ -498,8 +501,11 @@ static inline void get_tu_queue(CPUState *cpu,
                 target_tb = tb_create(cpu, ir1_target_pc, direct_cs_base,
                                       flags,
                                       cflags, max_insns, false);
-                if (!tu_can_link_to_tb(target_tb)) {
-                    target_tb->s_data->tu_tb_mode = TU_TB_MODE_SWITCH_TO_TB;
+                if (!target_tb || !tu_can_link_to_tb(target_tb)) {
+                    if (target_tb) {
+                        target_tb->s_data->tu_tb_mode =
+                            TU_TB_MODE_SWITCH_TO_TB;
+                    }
                     lata_tu_drop_all_edges(tb,
                         LATA_TU_FALLBACK_TARGET_NOT_TRANSLATABLE);
                     break;

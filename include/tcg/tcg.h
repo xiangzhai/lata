@@ -529,6 +529,7 @@ struct TCGContext {
 
 #if defined(CONFIG_SPLIT_TB) || defined(CONFIG_LATA_TU)
     /* split TB code and TB ptr*/
+    void *tb_gen_base;
     void *tb_gen_head;
     void *tb_gen_tail;
     void *tb_gen_highwater;

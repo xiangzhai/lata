@@ -1,3 +1,4 @@
+#include "qemu/osdep.h"
 #include <string.h>
 #include "reg-alloc.h"
 #include "ir2.h"
@@ -261,6 +262,14 @@ IR2_OPND ra_alloc_itemp(void)
 {
     IR2_OPND ir2_opnd;
     int itemp_num;
+    const uint32_t full_mask = (1u << itemp_status_num) - 1;
+
+    /* Cached GPR values hold itemp registers.  They are clean copies that
+     * already live in env, so unused ones can be evicted when the itemp pool
+     * runs dry instead of letting the cache starve instruction translation. */
+    if ((lsenv->tr_data->itemp_status & full_mask) == full_mask) {
+        lata_gpr_cache_reclaim();
+    }
 
     itemp_num = ra_alloc_itemp_num();
 

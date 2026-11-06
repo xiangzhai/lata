@@ -253,10 +253,19 @@ static void trans_CMPE_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
     int rm = extract32(insn, 16, 5);
     int rn = extract32(insn, 5, 5);
     IR2_OPND reg_m = alloc_gpr_src(rm);
-    IR2_OPND reg_n = alloc_gpr_src(rn);
+    IR2_OPND reg_n;
     IR2_OPND temp = ra_alloc_itemp();
     IR2_OPND temp_n = ra_alloc_itemp();
     IR2_OPND label = ir2_opnd_new_type(IR2_OPND_LABEL);
+
+    if (rn == 31) {
+        /* Extended-register form: Rn == 31 selects SP, not XZR.  Copy it as
+         * the nzcv materialization below clobbers reg_n in place. */
+        reg_n = ra_alloc_itemp();
+        la_or(reg_n, alloc_gpr_src_sp_ro(rn), zero_ir2_opnd);
+    } else {
+        reg_n = alloc_gpr_src_ro(rn);
+    }
 
     if (clearGprHigh && sf && arm_la_map[rn] >= 0) {
         clear_gpr_high(rn);
@@ -313,7 +322,7 @@ static void trans_CMPE_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
     {
         la_bstrpick_w(temp_n, reg_n, 31, 0);
         la_bstrpick_w(temp, temp, 31, 0);
-        pattern_type(b_type, &reg_n, &temp, &label);
+        pattern_type(b_type, &temp_n, &temp, &label);
     }
 
     if (clearGprHigh) {
@@ -450,6 +459,7 @@ static void trans_CMPS_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
 
     pattern_goto_tb(s, 1, offset);
 
+    free_alloc_gpr(reg_m);
     free_alloc_gpr(reg_n);
     free_alloc_gpr(temp);
     free_alloc_gpr(temp_n);
@@ -478,6 +488,15 @@ bool insts_pattern(DisasContext *s, DisasContext *s2)
     
     if (b_type && cmp_type)
     {
+        /* The fused compare uses full-width host comparisons on the operands.
+         * For 32-bit ordering conditions this does not match the architectural
+         * signed/unsigned 32-bit semantics, so leave those to the normal path. */
+        if (!(insn & (1u << 31)) &&
+            (b_type == B_CS || b_type == B_CC || b_type == B_HI ||
+             b_type == B_LS || b_type == B_GE || b_type == B_LT ||
+             b_type == B_GT || b_type == B_LE)) {
+            return false;
+        }
         int offset = sextract32(insn2, 5, 19) << 2;
         // s->base->tb->nzcv_use = false;
         switch (cmp_type)

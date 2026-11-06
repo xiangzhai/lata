@@ -5263,8 +5263,6 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
     IR2_OPND aligned_addr = ra_alloc_itemp();
     IR2_OPND word = ra_alloc_itemp();
     IR2_OPND mask = ra_alloc_itemp();
-    IR2_OPND cmp_old = ra_alloc_itemp();
-    IR2_OPND cmp_input = ra_alloc_itemp();
 
     la_label(label_ll);
     la_bstrpick_d(input_field, input, msb, 0);
@@ -5296,7 +5294,10 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
         la_or(new_field, input_field, zero_ir2_opnd);
         break;
     case LATA_LSE_SMAX:
-    case LATA_LSE_SMIN:
+    case LATA_LSE_SMIN: {
+        IR2_OPND cmp_old = ra_alloc_itemp();
+        IR2_OPND cmp_input = ra_alloc_itemp();
+
         if (sz == 1) {
             la_ext_w_h(cmp_old, old_field);
             la_ext_w_h(cmp_input, input_field);
@@ -5312,7 +5313,10 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
         }
         la_or(new_field, old_field, zero_ir2_opnd);
         la_label(label_done);
+        free_alloc_gpr(cmp_old);
+        free_alloc_gpr(cmp_input);
         break;
+    }
     case LATA_LSE_UMAX:
         la_or(new_field, input_field, zero_ir2_opnd);
         la_bltu(old_field, input_field, label_done);
@@ -5338,8 +5342,6 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
     free_alloc_gpr(aligned_addr);
     free_alloc_gpr(word);
     free_alloc_gpr(mask);
-    free_alloc_gpr(cmp_old);
-    free_alloc_gpr(cmp_input);
 }
 
 static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
@@ -8604,6 +8606,82 @@ do_convert_back:
     free_alloc_gpr(temp);
 }
 
+/* FRINT32Z/FRINT32X/FRINT64Z/FRINT64X use the softfloat helpers to get the
+ * range checking and Invalid-operation behaviour right.  Helper arguments
+ * are passed as integer-typed softfloat values in the normal argument
+ * registers, matching the rest of LATA's helper calls. */
+static void gen_fp_frint_helper(DisasContext *s, IR2_OPND vreg_d,
+                                unsigned rd, unsigned rn, bool is_single,
+                                int opcode)
+{
+    bool round_zero = (opcode == 0x10 || opcode == 0x12);
+    bool to_32bit = (opcode == 0x10 || opcode == 0x11);
+    void *helper_func;
+    IR2_OPND temp = ra_alloc_itemp();
+
+    if (is_single) {
+        helper_func = to_32bit ? (void *)helper_frint32_s
+                               : (void *)helper_frint64_s;
+    } else {
+        helper_func = to_32bit ? (void *)helper_frint32_d
+                               : (void *)helper_frint64_d;
+    }
+
+    li_d(temp, s->base->pc_next);
+    la_st_d(temp, env_ir2_opnd, env_offset_pc());
+    lata_gen_call_helper_prologue(tcg_ctx);
+
+    /* a0: input float bits, a1: fp_status */
+    li_d(temp, env_offset_fpr(rn));
+    if (is_single) {
+        la_ldx_wu(a0_ir2_opnd, env_ir2_opnd, temp);
+    } else {
+        la_ldx_d(a0_ir2_opnd, env_ir2_opnd, temp);
+    }
+    li_d(temp, env_offset_fpstatus());
+    la_add_d(a1_ir2_opnd, env_ir2_opnd, temp);
+
+    if (round_zero) {
+        li_d(a2_ir2_opnd, arm_rmode_to_sf(FPROUNDING_ZERO));
+        li_d(temp, env_offset_RMODE());
+        la_stx_w(a2_ir2_opnd, env_ir2_opnd, temp);
+    }
+
+    li_d(temp, (uint64_t)helper_func);
+    la_jirl(ra_ir2_opnd, temp, 0);
+
+    if (is_single) {
+        la_movgr2fr_w(vreg_d, a0_ir2_opnd);
+    } else {
+        la_movgr2fr_d(vreg_d, a0_ir2_opnd);
+    }
+    fpr_clear_high(vreg_d, is_single ? 2 : 3);
+
+    if (round_zero) {
+        /* Restore fp_status rounding mode from the guest FPSCR.  FPSCR
+         * bits[23:22] use the ARM encoding, while float_status uses the
+         * softfloat encoding, where the two middle modes are swapped. */
+        IR2_OPND temp2 = ra_alloc_itemp();
+
+        li_d(temp, env_offset_FPSCR());
+        la_ldx_wu(temp, env_ir2_opnd, temp);
+        la_bstrpick_d(temp2, temp, 22, 22);
+        la_slli_d(temp2, temp2, 1);
+        la_bstrpick_d(temp, temp, 23, 23);
+        la_or(temp, temp2, temp);
+        li_d(temp2, env_offset_RMODE());
+        la_stx_w(temp, env_ir2_opnd, temp2);
+        free_alloc_gpr(temp2);
+    }
+
+    /* Make the value visible to the epilogue, which reloads mapped FPRs. */
+    la_vst(vreg_d, env_ir2_opnd, env_offset_fpr(rd));
+    lata_vec_mark_clean(rd);
+
+    lata_gen_call_helper_epilogue(tcg_ctx);
+    free_alloc_gpr(temp);
+}
+
 /* Floating-point data-processing (1 source) - single precision */
 static void handle_fp_1src_single(DisasContext* s, int opcode, int rd, int rn)
 {
@@ -8664,19 +8742,11 @@ static void handle_fp_1src_single(DisasContext* s, int opcode, int rd, int rn)
             goto done;
             break;
         case 0x10: /* FRINT32Z */
-            // rmode = FPROUNDING_ZERO;
-            // gen_fpst = gen_helper_frint32_s;
-            break;
         case 0x11: /* FRINT32X */
-            // gen_fpst = gen_helper_frint32_s;
-            break;
         case 0x12: /* FRINT64Z */
-            // rmode = FPROUNDING_ZERO;
-            // gen_fpst = gen_helper_frint64_s;
-            break;
         case 0x13: /* FRINT64X */
-            // gen_fpst = gen_helper_frint64_s;
-            break;
+            gen_fp_frint_helper(s, vreg_d, rd, rn, true, opcode);
+            goto done;
         default:
             g_assert_not_reached();
     }
@@ -8754,19 +8824,11 @@ static void handle_fp_1src_double(DisasContext* s, int opcode, int rd, int rn)
             goto done;
             break;
         case 0x10: /* FRINT32Z */
-            // rmode = FPROUNDING_ZERO;
-            // gen_fpst = gen_helper_frint32_d;
-            break;
         case 0x11: /* FRINT32X */
-            // gen_fpst = gen_helper_frint32_d;
-            break;
         case 0x12: /* FRINT64Z */
-            // rmode = FPROUNDING_ZERO;
-            // gen_fpst = gen_helper_frint64_d;
-            break;
         case 0x13: /* FRINT64X */
-            // gen_fpst = gen_helper_frint64_d;
-            break;
+            gen_fp_frint_helper(s, vreg_d, rd, rn, false, opcode);
+            goto done;
         default:
             g_assert_not_reached();
     }
