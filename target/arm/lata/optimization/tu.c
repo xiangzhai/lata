@@ -346,8 +346,6 @@ static TranslationBlock* tb_create(CPUState *cpu, uint64_t pc,
     TranslationBlock* tb;
     tb = tcg_tb_alloc_full(tcg_ctx);
     if (unlikely(!tb)) {
-        fprintf(stderr, "tb flush\n");
-        /* exit(-1); */
         /* flush must be done */
         tb_flush(cpu);
         mmap_unlock();

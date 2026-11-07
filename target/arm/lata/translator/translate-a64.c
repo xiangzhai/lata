@@ -2886,24 +2886,6 @@ static void lata_helper_dc_zva(DisasContext* s, int rt)
     return;
 }
 
-static G_NORETURN void never_reach(const char* msg)
-{
-    lsassertm(0, "%s\n", msg);
-}
-
-static void gen_never_reach(DisasContext* ctx, const char* msg)
-{
-    IR2_OPND temp = ra_alloc_itemp();
-
-    li_d(a0_ir2_opnd, (uint64_t)msg);
-    li_d(temp, (uint64_t)never_reach);
-    la_jirl(ra_ir2_opnd, temp, 0);
-
-    free_alloc_gpr(temp);
-
-    return;
-}
-
 /* MRS - move from system register
  * MSR (register) - move to system register
  * SYS
@@ -2923,9 +2905,11 @@ static void handle_sys(DisasContext* s, bool isread,
 
     if (!ri) {
         /* Unknown register; this might be a guest error or a QEMU
-         * unimplemented feature.
+         * unimplemented feature.  Take an undefined-instruction exception
+         * rather than aborting the emulator, matching the architecture and
+         * letting guests probe unimplemented system registers.
          */
-        gen_never_reach(s, "Unknown register");
+        lata_unallocated_encoding(s);
         return;
     }
 
@@ -4744,7 +4728,11 @@ static bool trans_LDR(DisasContext* s)
         clear_gpr_high(a->rn);
     }
 
-    if (clearGprHigh && a->sz == 3 && arm_la_map[a->rm] >= 0 && a->rm != 31) {
+    /* The register-offset form uses the full 64-bit Xm whenever the
+     * extension size is 3 (option 011/111), even for byte/halfword/word
+     * accesses.  Clear any pending 32-bit write before using it. */
+    if (clearGprHigh && extract32(a->opt, 0, 2) == 3 &&
+        arm_la_map[a->rm] >= 0 && a->rm != 31) {
         clear_gpr_high(a->rm);
     }
 
@@ -4913,7 +4901,11 @@ static bool trans_STR(DisasContext* s)
         clear_gpr_high(a->rt);
     }
 
-    if (clearGprHigh && a->sz == 3 && arm_la_map[a->rm] >= 0 && a->rm != 31) {
+    /* The register-offset form uses the full 64-bit Xm whenever the
+     * extension size is 3 (option 011/111), even for byte/halfword/word
+     * accesses.  Clear any pending 32-bit write before using it. */
+    if (clearGprHigh && extract32(a->opt, 0, 2) == 3 &&
+        arm_la_map[a->rm] >= 0 && a->rm != 31) {
         clear_gpr_high(a->rm);
     }
 
@@ -21822,6 +21814,7 @@ static bool (*translate_functions[])(DisasContext*) = {
     TRANS_DISAS_FUNC_GEN(AARCH64_A64_DATA_PROC_SIMD_FD, simd_fp),
     TRANS_FUNC_GEN(AARCH64_A64_EXCP_ILLEGAL, EXCP_ILLEGAL),
     TRANS_FUNC_GEN(AARCH64_A64_EXCP_BTI, EXCP_BTI),
+    TRANS_FUNC_GEN_REAL(AARCH64_A64_UNALLOCATED, (void*)lata_unallocated_encoding),
 };
 
 static void aarch64_tr_init_disas_context(DisasContext* dc,
@@ -21964,6 +21957,13 @@ static void disas_a64_legacy(DisasContext* s, uint32_t insn)
             s->insn_type = AARCH64_A64_DATA_PROC_SIMD_FD;
             break;
         default:
+            /* SVE/SME encodings and anything else the translator does not
+             * implement take an undefined-instruction exception, matching
+             * the architecture.  This is also what guest feature probes
+             * (eg. Rust's std_detect) rely on to detect missing features.
+             */
+            s->insn_type = AARCH64_A64_UNALLOCATED;
+            s->base->is_jmp = DISAS_NORETURN;
             break;
     }
 }

@@ -1578,6 +1578,7 @@ static void lata_df_analyze_ir1(LataIR1Facts *fact, DisasContext *ir1)
     case AARCH64_A64_HLT:
     case AARCH64_A64_EXCP_ILLEGAL:
     case AARCH64_A64_EXCP_BTI:
+    case AARCH64_A64_UNALLOCATED:
         fact->helper_boundary = true;
         fact->state_boundary = true;
         break;

@@ -489,12 +489,9 @@ bool insts_pattern(DisasContext *s, DisasContext *s2)
     if (b_type && cmp_type)
     {
         /* The fused compare uses full-width host comparisons on the operands.
-         * For 32-bit ordering conditions this does not match the architectural
-         * signed/unsigned 32-bit semantics, so leave those to the normal path. */
-        if (!(insn & (1u << 31)) &&
-            (b_type == B_CS || b_type == B_CC || b_type == B_HI ||
-             b_type == B_LS || b_type == B_GE || b_type == B_LT ||
-             b_type == B_GT || b_type == B_LE)) {
+         * For 32-bit compares this does not always match the architectural
+         * 32-bit semantics, so leave those to the normal path. */
+        if (!(insn & (1u << 31))) {
             return false;
         }
         int offset = sextract32(insn2, 5, 19) << 2;
