@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "qemu/osdep.h"
+#include "qemu/rcu.h"
 #include "mem.h"
 #include "ir2.h"
 #include "la-append.h"
@@ -44,6 +45,7 @@ struct LataFAMCache {
     uint32_t size;
     uint32_t mask;
     TranslationBlock **fast_tbs;
+    struct rcu_head rcu;
     LataFAMEntry entries[];
 };
 typedef struct LataFAMCache LataFAMCache;
@@ -132,7 +134,7 @@ TranslationBlock *lata_fam_lookup_tb(CPUArchState *env, uint64_t pc,
                                      uint32_t cflags);
 void lata_fam_prelink_tb(TranslationBlock *tb);
 
-int tr_ir2_assemble(const void *code_start_addr);
+int tr_ir2_assemble(const void *code_start_addr, int max_bytes);
 void label_dispose(void);
 
 void lata_gen_call_helper_prologue(TCGContext *tcg_ctx);

@@ -634,7 +634,11 @@ void cpu_exec_step_atomic(CPUState *cpu)
         tb = tb_lookup(cpu, pc, cs_base, flags, cflags);
         if (tb == NULL) {
             mmap_lock();
+#ifdef CONFIG_LATA_TU
+            tb = tu_gen_code(cpu, pc, cs_base, flags, cflags);
+#else
             tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
+#endif
             mmap_unlock();
         }
 

@@ -756,6 +756,19 @@ void aarch64_max_tcg_initfn(Object *obj)
     t = FIELD_DP64(t, ID_AA64ISAR0, RNDR, 1);     /* FEAT_RNG */
 #ifdef CONFIG_LATA
     t = FIELD_DP64(t, ID_AA64ISAR0, RNDR, 0);
+    /*
+     * The LATA translator does not implement the AArch64 crypto
+     * instructions yet (disas_crypto_* raise an undefined instruction).
+     * Do not advertise them, otherwise guests such as Bun select the
+     * hardware-accelerated paths and crash.  Keep CRC32, which is
+     * implemented.
+     */
+    t = FIELD_DP64(t, ID_AA64ISAR0, AES, 0);
+    t = FIELD_DP64(t, ID_AA64ISAR0, SHA1, 0);
+    t = FIELD_DP64(t, ID_AA64ISAR0, SHA2, 0);
+    t = FIELD_DP64(t, ID_AA64ISAR0, SHA3, 0);
+    t = FIELD_DP64(t, ID_AA64ISAR0, SM3, 0);
+    t = FIELD_DP64(t, ID_AA64ISAR0, SM4, 0);
 #endif
     cpu->isar.id_aa64isar0 = t;
 

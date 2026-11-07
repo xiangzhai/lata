@@ -291,7 +291,13 @@ int tr_translate_tb(struct TranslationBlock *tb)
     if (option_lata_dump_ir2) {
         lata_debug_dump_ir2();
     }
-    int gen_code_size = tr_ir2_assemble(gen_code_buf) * 4;
+    int max_bytes = (int)((uint8_t *)tcg_ctx->code_gen_highwater -
+                          (uint8_t *)gen_code_buf);
+    int gen_insns = tr_ir2_assemble(gen_code_buf, max_bytes);
+    if (gen_insns < 0) {
+        return -1;
+    }
+    int gen_code_size = gen_insns * 4;
     tb->codesize = gen_code_size;
     if (option_lata_dump_host) {
         lata_debug_dump_host(tb, gen_code_buf, gen_code_size);

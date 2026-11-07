@@ -12950,16 +12950,30 @@ static void handle_3same_64(DisasContext* s, int opcode, bool u,
 
             break;
         case 0x6: /* CMGT, CMHI */
-            lata_unallocated_encoding(s);
-            return;
+            if (u) {
+                la_vslt_du(vreg_d, vreg_m, vreg_n);
+            } else {
+                la_vslt_d(vreg_d, vreg_m, vreg_n);
+            }
+            la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
             break;
         case 0x7: /* CMGE, CMHS */
-            lata_unallocated_encoding(s);
-            return;
+            if (u) {
+                la_vsle_du(vreg_d, vreg_m, vreg_n);
+            } else {
+                la_vsle_d(vreg_d, vreg_m, vreg_n);
+            }
+            la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
             break;
         case 0x11: /* CMTST, CMEQ */
-            lata_unallocated_encoding(s);
-            return;
+            if (u) { /* CMEQ */
+                la_vseq_d(vreg_d, vreg_n, vreg_m);
+            } else { /* CMTST */
+                la_vand_v(vreg_d, vreg_n, vreg_m);
+                la_vseqi_d(vreg_d, vreg_d, 0);
+                la_vnori_b(vreg_d, vreg_d, 0);
+            }
+            la_vinsgr2vr_d(vreg_d, zero_ir2_opnd, 1);
             break;
         case 0x8: /* SSHL, USHL */
             /* 取元素中shift */
@@ -22267,11 +22281,14 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
 
     int ir1_nr = tb->icount;
     DisasContext* pir1 = (DisasContext*)tb->ir1;
+#ifdef CONFIG_LATA_TU
+    DisasContextBase tu_base;
+#endif
     lata_df_begin_translate(tb);
     lata_vec_dirty_reset();
     for (i = 0; i < ir1_nr; ++i) {
 #ifdef CONFIG_LATA_TU
-        DisasContextBase tu_base = *pir1->base;
+        tu_base = *pir1->base;
         tu_base.tb = tb;
         tu_base.pc_first = tb->pc;
         tu_base.pc_next = pir1->pc_curr + 4;

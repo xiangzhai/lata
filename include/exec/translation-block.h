@@ -208,12 +208,12 @@ struct TranslationBlock {
      * setting one of the jump targets (or patching the jump instruction). Only
      * two of such jumps are supported.
      */
-#define TB_JMP_OFFSET_INVALID 0xffff /* indicates no jump generated */
-    uint16_t jmp_reset_offset[2]; /* offset of original jump target */
-    uint16_t jmp_insn_offset[2];  /* offset of direct jump insn */
+#define TB_JMP_OFFSET_INVALID 0xffffffff /* indicates no jump generated */
+    uint32_t jmp_reset_offset[2]; /* offset of original jump target */
+    uint32_t jmp_insn_offset[2];  /* offset of direct jump insn */
     uintptr_t jmp_target_addr[2]; /* target address */
 #ifdef CONFIG_LATA_INSTS_PATTERN
-    uint16_t nzcv_save[2];
+    uint32_t nzcv_save[2];
     bool nzcv_use;
 #endif
     /*

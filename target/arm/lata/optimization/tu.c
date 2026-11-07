@@ -37,7 +37,7 @@ typedef struct LataTUScratch {
     uint32_t search_buff_offset[MAX_TB_IN_TU];
 } LataTUScratch;
 
-static LataTUScratch tu_scratch;
+static __thread LataTUScratch tu_scratch;
 
 static void tu_scratch_begin(void)
 {
@@ -1561,11 +1561,11 @@ bool tu_relocat_branch(TranslationBlock *tb, int n)
 }
 
 /* translate tu from ir1->ir2 and link tbs if next_tb in tu*/
-void translate_tu(TranslationBlock **tb_list)
+bool translate_tu(TranslationBlock **tb_list)
 {
     uint32_t tb_num_in_tu = tu_data->tb_num;
     if (tb_num_in_tu == 0) {
-        return;
+        return true;
     }
     int gen_code_size;
     TranslationBlock *tb;
@@ -1588,6 +1588,9 @@ void translate_tu(TranslationBlock **tb_list)
                                     tb->next_tb[TU_TB_INDEX_TARGET]);
         }
         gen_code_size = translate_tb_in_tu(tb);
+        if (gen_code_size < 0) {
+            return false;
+        }
         qatomic_set(&tcg_ctx->code_gen_ptr, (void *)ROUND_UP((uintptr_t)tcg_ctx->code_gen_ptr + gen_code_size, CODE_GEN_ALIGN));
         tb->tc.size = gen_code_size;
         tb->codesize = gen_code_size;
@@ -1623,6 +1626,7 @@ void translate_tu(TranslationBlock **tb_list)
                         tb_list[0]->s_data->tu_size);
 #endif
 
+    return true;
 }
 
 /* print tu if open in_asm/out_asm debug mode */
@@ -1711,10 +1715,23 @@ TranslationBlock *tu_gen_code(CPUState *cpu,
     qemu_thread_jit_write();
     tu_scratch_begin();
 
+    /* An abandoned translation (e.g. after a code-cache flush) may leave
+     * stale TranslationBlock pointers in the per-thread lookup tree.  Drop
+     * them before exploring a fresh TU. */
+    tu_trees_reset();
+
     /* 1.Search all TBs in the function */
     entry = tb_explore(cpu, pc, cs_base, flags, cflags);
     /* 2.Translate TU*/
-    translate_tu(tb_list);
+    if (!translate_tu(tb_list)) {
+        /* Generated code would overflow the current code buffer.  Flush and
+         * let the caller retry with a fresh buffer. */
+        tu_scratch_end();
+        tb_flush(cpu);
+        mmap_unlock();
+        cpu->exception_index = EXCP_INTERRUPT;
+        cpu_loop_exit(cpu);
+    }
     /* 3.Insert TBs in TU to QHT */
     register_tu(tb_list, cpu, cflags);
     print_tu(cpu, tb_list);

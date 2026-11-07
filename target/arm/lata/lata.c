@@ -630,7 +630,7 @@ int lata_gen_prologue(TCGContext *tcg_ctx)
     tr_init(NULL);
     generate_context_switch_bt_to_native();
 //    int ins_nr = la_encode(tcg_ctx, code_buf_rw);
-    int ins_nr = tr_ir2_assemble(code_buf_rw);
+    int ins_nr = tr_ir2_assemble(code_buf_rw, -1);
     tr_fini();
 
     return ins_nr;
@@ -651,7 +651,7 @@ int lata_gen_epilogue(TCGContext *tcg_ctx)
 
     tr_init(NULL);
     generate_context_switch_native_to_bt();
-    int ins_nr = tr_ir2_assemble(code_buf_rw);
+    int ins_nr = tr_ir2_assemble(code_buf_rw, -1);
     tr_fini();
 
     return ins_nr;
@@ -789,7 +789,7 @@ void label_dispose(void)
     }
 }
 
-int tr_ir2_assemble(const void *code_start_addr)
+int tr_ir2_assemble(const void *code_start_addr, int max_bytes)
 {
     if (lata_dump || option_lata_dump_host) {
         qemu_log("[LATA] Assemble IR2.\n");
@@ -806,21 +806,28 @@ int tr_ir2_assemble(const void *code_start_addr)
     /* 3. assemble */
     IR2_INST *pir2 = lsenv->tr_data->first_ir2;
 
-    void *code_addr = (void *) code_start_addr;
+    uintptr_t code_addr = (uintptr_t)code_start_addr;
+    uintptr_t code_start = (uintptr_t)code_start_addr;
     int code_nr = 0;
 
     while (pir2 != NULL) {
         if (ir2_opcode(pir2) != LISA_LABEL &&
             ir2_opcode(pir2) != LISA_X86_INST) {
-            uint32 result = ir2_assemble(pir2);
+            uint32 result;
+
+            if (max_bytes >= 0 &&
+                (int)(code_addr - code_start) + 4 > max_bytes) {
+                return -1;
+            }
+            result = ir2_assemble(pir2);
 
             if (lata_dump || option_lata_dump_host) {
-                lata_debug_dump_assembled_ir2(pir2->_id, code_addr, result,
+                lata_debug_dump_assembled_ir2(pir2->_id, (void *)code_addr, result,
                                               pir2);
             }
 
             *(uint32 *)code_addr = result;
-            code_addr = code_addr + 4;
+            code_addr += 4;
             code_nr += 1;
         }
         pir2 = ir2_next(pir2);
@@ -1138,15 +1145,30 @@ bool lata_fam_init(CPUArchState *env)
     return true;
 }
 
+static void lata_fam_cache_destroy_rcu(struct rcu_head *head)
+{
+    LataFAMCache *cache = container_of(head, LataFAMCache, rcu);
+
+    g_free(cache->fast_tbs);
+    g_free(cache);
+}
+
 void lata_fam_destroy(CPUArchState *env)
 {
     LataFAMCache *cache = env->lata_fam_cache;
 
-    if (cache) {
-        g_free(cache->fast_tbs);
-        g_free(cache);
+    if (!cache) {
+        return;
     }
+
+    /*
+     * Other threads may still walk this CPU through CPU_FOREACH() while
+     * invalidating translations (eg. from a signal handler).  Clear the
+     * pointer first and defer the actual free until an RCU grace period
+     * has elapsed so those readers never observe freed memory.
+     */
     env->lata_fam_cache = NULL;
+    call_rcu1(&cache->rcu, lata_fam_cache_destroy_rcu);
 }
 
 void lata_fam_clear_all(CPUArchState *env)
