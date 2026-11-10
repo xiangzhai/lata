@@ -2086,10 +2086,12 @@ static bool trans_CLREX(DisasContext* s)
 
 static void lata_gen_mb(void)
 {
-    bool parallel = tcg_ctx->gen_tb->cflags & CF_PARALLEL;
-    if (parallel) {
-        la_dbar(0);
-    }
+    /*
+     * User-mode guests can always have multiple host threads (clone), and the
+     * TB cflags are not a reliable indication that barriers can be elided.
+     * Emit the full barrier unconditionally.
+     */
+    la_dbar(0);
 }
 
 static bool trans_DSB_DMB(DisasContext* s)
