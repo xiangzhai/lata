@@ -3275,7 +3275,10 @@ static void lata_load_exclusive(DisasContext* s, int rt, int rt2, int rn,
                 la_ld_d(reg_t, reg_n, 8);
             }
         }
-        store_fpr_dst(rt2, reg_t2);
+        if (rt2 != 31 && arm_la_map[rt2] >= 0 && clearGprHigh) {
+            set_w_write_flag(rt2, TRUE);
+        }
+        store_gpr_dst(rt2, reg_t2);
         free_alloc_gpr(reg_t2);
     } else {
         // if(size == 2){
@@ -3761,7 +3764,7 @@ static bool trans_CAS(DisasContext* s)
     arg_CAS* a = &(s->arg.f_decode_insn3221);
     IR2_OPND reg_s = alloc_gpr_src(a->rs);
     IR2_OPND reg_t = alloc_gpr_src(a->rt);
-    IR2_OPND reg_n = alloc_gpr_src(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
     IR2_OPND src = ra_alloc_itemp();
     IR2_OPND dest = ra_alloc_itemp();
     IR2_OPND label_exit = ir2_opnd_new_type(IR2_OPND_LABEL);
@@ -5254,7 +5257,6 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
     IR2_OPND offset = ra_alloc_itemp();
     IR2_OPND aligned_addr = ra_alloc_itemp();
     IR2_OPND word = ra_alloc_itemp();
-    IR2_OPND mask = ra_alloc_itemp();
 
     la_label(label_ll);
     la_bstrpick_d(input_field, input, msb, 0);
@@ -5264,8 +5266,6 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
     la_ll_d(word, aligned_addr, 0);
     la_slli_d(offset, offset, 3);
 
-    li_d(mask, field_mask);
-    la_sll_d(mask, mask, offset);
     la_srl_d(old_field, word, offset);
     la_bstrpick_d(old_field, old_field, msb, 0);
 
@@ -5288,25 +5288,23 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
     case LATA_LSE_SMAX:
     case LATA_LSE_SMIN: {
         IR2_OPND cmp_old = ra_alloc_itemp();
-        IR2_OPND cmp_input = ra_alloc_itemp();
 
         if (sz == 1) {
             la_ext_w_h(cmp_old, old_field);
-            la_ext_w_h(cmp_input, input_field);
+            la_ext_w_h(input_field, input_field);
         } else {
             la_ext_w_b(cmp_old, old_field);
-            la_ext_w_b(cmp_input, input_field);
+            la_ext_w_b(input_field, input_field);
         }
         la_or(new_field, input_field, zero_ir2_opnd);
         if (op == LATA_LSE_SMAX) {
-            la_blt(cmp_old, cmp_input, label_done);
+            la_blt(cmp_old, input_field, label_done);
         } else {
-            la_blt(cmp_input, cmp_old, label_done);
+            la_blt(input_field, cmp_old, label_done);
         }
         la_or(new_field, old_field, zero_ir2_opnd);
         la_label(label_done);
         free_alloc_gpr(cmp_old);
-        free_alloc_gpr(cmp_input);
         break;
     }
     case LATA_LSE_UMAX:
@@ -5324,7 +5322,9 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
     }
 
     la_bstrpick_d(new_field, new_field, msb, 0);
-    la_andn(word, word, mask);
+    li_d(input_field, field_mask);
+    la_sll_d(input_field, input_field, offset);
+    la_andn(word, word, input_field);
     la_sll_d(new_field, new_field, offset);
     la_or(word, word, new_field);
     la_sc_d(word, aligned_addr, 0);
@@ -5333,7 +5333,6 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
     free_alloc_gpr(offset);
     free_alloc_gpr(aligned_addr);
     free_alloc_gpr(word);
-    free_alloc_gpr(mask);
 }
 
 static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
