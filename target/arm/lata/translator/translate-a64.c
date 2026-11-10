@@ -17,6 +17,7 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
 #include "qemu/osdep.h"
+#include "qemu/thread.h"
 
 #ifdef CONFIG_LATA
 #include "target/arm/lata/include/translate.h"
@@ -5246,121 +5247,129 @@ typedef enum LATALseAtomicOp {
     LATA_LSE_SWP,
 } LATALseAtomicOp;
 
-static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
-    IR2_OPND input, IR2_OPND input_field, IR2_OPND new_field, int sz,
-    LATALseAtomicOp op)
+/*
+ * Narrow (byte/halfword) LSE atomics cannot be implemented with a whole-word
+ * LL/SC read-modify-write: guest threads are host threads, and the LoongArch
+ * exclusive monitor does not guarantee that a concurrent update to another
+ * field in the same word makes SC fail.  Do the RMW in C under a process-wide
+ * lock so adjacent byte/halfword atomics never lose updates.
+ */
+static QemuSpin lata_narrow_atomic_lock;
+
+uint64_t lata_narrow_atomic(uint64_t addr, uint64_t operand, uint32_t sz,
+                            uint32_t op)
 {
-    const int msb = sz == 1 ? 15 : 7;
-    const uint64_t field_mask = sz == 1 ? 0xffff : 0xff;
-    IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
-    IR2_OPND label_done = ir2_opnd_new_type(IR2_OPND_LABEL);
-    IR2_OPND offset = ra_alloc_itemp();
-    IR2_OPND aligned_addr = ra_alloc_itemp();
-    IR2_OPND word;
+    void *p = (void *)(uintptr_t)addr;
+    uint64_t old;
 
-    /* addr is only needed to compute the aligned word and byte offset. */
-    la_bstrpick_d(offset, addr, 2, 0);
-    la_or(aligned_addr, addr, zero_ir2_opnd);
-    la_bstrins_d(aligned_addr, zero_ir2_opnd, 2, 0);
-    /* addr is dead now; the caller hands ownership to us for this path. */
-    free_alloc_gpr(addr);
-    word = ra_alloc_itemp();
-    la_slli_d(offset, offset, 3);
+    qemu_spin_lock(&lata_narrow_atomic_lock);
+    if (sz == 0) {
+        uint8_t *q = p;
+        uint8_t o = __atomic_load_n(q, __ATOMIC_RELAXED);
+        uint8_t in = (uint8_t)operand;
+        uint8_t n = o;
 
-    la_label(label_ll);
-    la_bstrpick_d(input_field, input, msb, 0);
-    la_ll_d(word, aligned_addr, 0);
-
-    la_srl_d(old_field, word, offset);
-    la_bstrpick_d(old_field, old_field, msb, 0);
-
-    switch (op) {
-    case LATA_LSE_ADD:
-        la_add_d(new_field, old_field, input_field);
-        break;
-    case LATA_LSE_CLR:
-        la_andn(new_field, old_field, input_field);
-        break;
-    case LATA_LSE_EOR:
-        la_xor(new_field, old_field, input_field);
-        break;
-    case LATA_LSE_SET:
-        la_or(new_field, old_field, input_field);
-        break;
-    case LATA_LSE_SWP:
-        la_or(new_field, input_field, zero_ir2_opnd);
-        break;
-    case LATA_LSE_SMAX:
-    case LATA_LSE_SMIN:
-        if (sz == 1) {
-            la_ext_w_h(old_field, old_field);
-            la_ext_w_h(input_field, input_field);
-        } else {
-            la_ext_w_b(old_field, old_field);
-            la_ext_w_b(input_field, input_field);
+        switch (op) {
+        case LATA_LSE_ADD: n = o + in; break;
+        case LATA_LSE_CLR: n = o & (uint8_t)~in; break;
+        case LATA_LSE_EOR: n = o ^ in; break;
+        case LATA_LSE_SET: n = o | in; break;
+        case LATA_LSE_SMAX: n = (int8_t)o > (int8_t)in ? o : in; break;
+        case LATA_LSE_SMIN: n = (int8_t)o < (int8_t)in ? o : in; break;
+        case LATA_LSE_UMAX: n = o > in ? o : in; break;
+        case LATA_LSE_UMIN: n = o < in ? o : in; break;
+        case LATA_LSE_SWP: n = in; break;
+        default: break;
         }
-        la_or(new_field, input_field, zero_ir2_opnd);
-        if (op == LATA_LSE_SMAX) {
-            la_blt(old_field, input_field, label_done);
-        } else {
-            la_blt(input_field, old_field, label_done);
+        __atomic_store_n(q, n, __ATOMIC_RELAXED);
+        old = o;
+    } else {
+        uint16_t *q = p;
+        uint16_t o = __atomic_load_n(q, __ATOMIC_RELAXED);
+        uint16_t in = (uint16_t)operand;
+        uint16_t n = o;
+
+        switch (op) {
+        case LATA_LSE_ADD: n = o + in; break;
+        case LATA_LSE_CLR: n = o & (uint16_t)~in; break;
+        case LATA_LSE_EOR: n = o ^ in; break;
+        case LATA_LSE_SET: n = o | in; break;
+        case LATA_LSE_SMAX: n = (int16_t)o > (int16_t)in ? o : in; break;
+        case LATA_LSE_SMIN: n = (int16_t)o < (int16_t)in ? o : in; break;
+        case LATA_LSE_UMAX: n = o > in ? o : in; break;
+        case LATA_LSE_UMIN: n = o < in ? o : in; break;
+        case LATA_LSE_SWP: n = in; break;
+        default: break;
         }
-        la_or(new_field, old_field, zero_ir2_opnd);
-        la_label(label_done);
-        break;
-    case LATA_LSE_UMAX:
-        la_or(new_field, input_field, zero_ir2_opnd);
-        la_bltu(old_field, input_field, label_done);
-        la_or(new_field, old_field, zero_ir2_opnd);
-        la_label(label_done);
-        break;
-    case LATA_LSE_UMIN:
-        la_or(new_field, input_field, zero_ir2_opnd);
-        la_bltu(input_field, old_field, label_done);
-        la_or(new_field, old_field, zero_ir2_opnd);
-        la_label(label_done);
-        break;
+        __atomic_store_n(q, n, __ATOMIC_RELAXED);
+        old = o;
     }
-
-    la_bstrpick_d(new_field, new_field, msb, 0);
-    la_bstrpick_d(old_field, old_field, msb, 0);
-    li_d(input_field, field_mask);
-    la_sll_d(input_field, input_field, offset);
-    la_andn(word, word, input_field);
-    la_sll_d(new_field, new_field, offset);
-    la_or(word, word, new_field);
-    la_sc_d(word, aligned_addr, 0);
-    la_beqz(word, label_ll);
-
-    free_alloc_gpr(offset);
-    free_alloc_gpr(aligned_addr);
-    free_alloc_gpr(word);
+    qemu_spin_unlock(&lata_narrow_atomic_lock);
+    return old;
 }
 
 static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
 {
     int acquire = extract32(s->insn, 23, 1);
     int release = extract32(s->insn, 22, 1);
-
     arg_atomic* a = &(s->arg.f_atomic);
-    IR2_OPND reg_s = alloc_gpr_src(a->rs);
-    IR2_OPND reg_t = a->rt == 31 ? ra_alloc_itemp() : alloc_gpr_dst(a->rt);
-    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
-    IR2_OPND src = zero_ir2_opnd;
-    IR2_OPND dest = ra_alloc_itemp();
-    bool src_alias_reg_s = false;
-    bool reg_n_freed = false;
 
     if (a->rn == 31) {
         gen_check_sp_alignment(s);
     }
+
+    if (a->sz < 2) {
+        IR2_OPND helper;
+        IR2_OPND dst;
+
+        lata_gen_call_helper_prologue(tcg_ctx);
+        la_ld_d(a0_ir2_opnd, env_ir2_opnd, env_offset_gpr(a->rn));
+        if (a->rs == 31) {
+            la_mov64(a1_ir2_opnd, zero_ir2_opnd);
+        } else {
+            la_ld_d(a1_ir2_opnd, env_ir2_opnd, env_offset_gpr(a->rs));
+        }
+        li_d(a2_ir2_opnd, a->sz);
+        li_d(a3_ir2_opnd, op);
+        if (release) {
+            la_dbar(0);
+        }
+        helper = ra_alloc_itemp();
+        li_d(helper, (uint64_t)lata_narrow_atomic);
+        la_jirl(ra_ir2_opnd, helper, 0);
+        free_alloc_gpr(helper);
+        if (acquire) {
+            la_dbar(0);
+        }
+        la_st_d(a0_ir2_opnd, env_ir2_opnd, env_offset(exclusive_memdata));
+        lata_gen_call_helper_epilogue(tcg_ctx);
+
+        if (a->rt != 31) {
+            if (arm_la_map[a->rt] >= 0) {
+                dst = ir2_opnd_new(IR2_OPND_GPR, arm_la_map[a->rt]);
+                if (clearGprHigh) {
+                    set_w_write_flag(a->rt, TRUE);
+                }
+            } else {
+                dst = ra_alloc_itemp();
+            }
+            la_ld_d(dst, env_ir2_opnd, env_offset(exclusive_memdata));
+            store_gpr_dst(a->rt, dst);
+            free_alloc_gpr(dst);
+        }
+        return true;
+    }
+
+    IR2_OPND reg_s = alloc_gpr_src(a->rs);
+    IR2_OPND reg_t = a->rt == 31 ? ra_alloc_itemp() : alloc_gpr_dst(a->rt);
+    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
+    IR2_OPND src = ra_alloc_itemp();
 
     if (release) {
         la_dbar(0);
     }
 
     if (a->sz == 3) {
-        src = ra_alloc_itemp();
         la_or(src, reg_s, zero_ir2_opnd);
         switch (op) {
         case LATA_LSE_ADD: la_amadd_d(reg_t, src, reg_n); break;
@@ -5376,8 +5385,7 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
         case LATA_LSE_UMIN: la_ammin_du(reg_t, src, reg_n); break;
         case LATA_LSE_SWP: la_amswap_d(reg_t, src, reg_n); break;
         }
-    } else if (a->sz == 2) {
-        src = ra_alloc_itemp();
+    } else {
         la_bstrpick_d(src, reg_s, 31, 0);
         switch (op) {
         case LATA_LSE_ADD: la_amadd_w(reg_t, src, reg_n); break;
@@ -5394,34 +5402,18 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
         case LATA_LSE_SWP: la_amswap_w(reg_t, src, reg_n); break;
         }
         la_bstrpick_d(reg_t, reg_t, 31, 0);
-    } else {
-        if (arm_la_map[a->rs] >= 0) {
-            src = ra_alloc_itemp();
-        } else {
-            src = reg_s;
-            src_alias_reg_s = true;
-        }
-        /* gen_lse_atomic_narrow_llsc() takes ownership of reg_n. */
-        gen_lse_atomic_narrow_llsc(reg_t, reg_n, reg_s, src, dest, a->sz, op);
-        reg_n_freed = true;
     }
 
     if (acquire) {
         la_dbar(0);
     }
-
     if (a->rt != 31) {
         store_gpr_dst(a->rt, reg_t);
     }
     free_alloc_gpr(reg_s);
     free_alloc_gpr(reg_t);
-    if (!reg_n_freed) {
-        free_alloc_gpr(reg_n);
-    }
-    if (!src_alias_reg_s) {
-        free_alloc_gpr(src);
-    }
-    free_alloc_gpr(dest);
+    free_alloc_gpr(reg_n);
+    free_alloc_gpr(src);
     return true;
 }
 
