@@ -5256,15 +5256,20 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
     IR2_OPND label_done = ir2_opnd_new_type(IR2_OPND_LABEL);
     IR2_OPND offset = ra_alloc_itemp();
     IR2_OPND aligned_addr = ra_alloc_itemp();
-    IR2_OPND word = ra_alloc_itemp();
+    IR2_OPND word;
 
-    la_label(label_ll);
-    la_bstrpick_d(input_field, input, msb, 0);
+    /* addr is only needed to compute the aligned word and byte offset. */
     la_bstrpick_d(offset, addr, 2, 0);
     la_or(aligned_addr, addr, zero_ir2_opnd);
     la_bstrins_d(aligned_addr, zero_ir2_opnd, 2, 0);
-    la_ll_d(word, aligned_addr, 0);
+    /* addr is dead now; the caller hands ownership to us for this path. */
+    free_alloc_gpr(addr);
+    word = ra_alloc_itemp();
     la_slli_d(offset, offset, 3);
+
+    la_label(label_ll);
+    la_bstrpick_d(input_field, input, msb, 0);
+    la_ll_d(word, aligned_addr, 0);
 
     la_srl_d(old_field, word, offset);
     la_bstrpick_d(old_field, old_field, msb, 0);
@@ -5286,27 +5291,23 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
         la_or(new_field, input_field, zero_ir2_opnd);
         break;
     case LATA_LSE_SMAX:
-    case LATA_LSE_SMIN: {
-        IR2_OPND cmp_old = ra_alloc_itemp();
-
+    case LATA_LSE_SMIN:
         if (sz == 1) {
-            la_ext_w_h(cmp_old, old_field);
+            la_ext_w_h(old_field, old_field);
             la_ext_w_h(input_field, input_field);
         } else {
-            la_ext_w_b(cmp_old, old_field);
+            la_ext_w_b(old_field, old_field);
             la_ext_w_b(input_field, input_field);
         }
         la_or(new_field, input_field, zero_ir2_opnd);
         if (op == LATA_LSE_SMAX) {
-            la_blt(cmp_old, input_field, label_done);
+            la_blt(old_field, input_field, label_done);
         } else {
-            la_blt(input_field, cmp_old, label_done);
+            la_blt(input_field, old_field, label_done);
         }
         la_or(new_field, old_field, zero_ir2_opnd);
         la_label(label_done);
-        free_alloc_gpr(cmp_old);
         break;
-    }
     case LATA_LSE_UMAX:
         la_or(new_field, input_field, zero_ir2_opnd);
         la_bltu(old_field, input_field, label_done);
@@ -5322,6 +5323,7 @@ static void gen_lse_atomic_narrow_llsc(IR2_OPND old_field, IR2_OPND addr,
     }
 
     la_bstrpick_d(new_field, new_field, msb, 0);
+    la_bstrpick_d(old_field, old_field, msb, 0);
     li_d(input_field, field_mask);
     la_sll_d(input_field, input_field, offset);
     la_andn(word, word, input_field);
@@ -5344,8 +5346,10 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
     IR2_OPND reg_s = alloc_gpr_src(a->rs);
     IR2_OPND reg_t = a->rt == 31 ? ra_alloc_itemp() : alloc_gpr_dst(a->rt);
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
-    IR2_OPND src = ra_alloc_itemp();
+    IR2_OPND src = zero_ir2_opnd;
     IR2_OPND dest = ra_alloc_itemp();
+    bool src_alias_reg_s = false;
+    bool reg_n_freed = false;
 
     if (a->rn == 31) {
         gen_check_sp_alignment(s);
@@ -5356,6 +5360,7 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
     }
 
     if (a->sz == 3) {
+        src = ra_alloc_itemp();
         la_or(src, reg_s, zero_ir2_opnd);
         switch (op) {
         case LATA_LSE_ADD: la_amadd_d(reg_t, src, reg_n); break;
@@ -5372,6 +5377,7 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
         case LATA_LSE_SWP: la_amswap_d(reg_t, src, reg_n); break;
         }
     } else if (a->sz == 2) {
+        src = ra_alloc_itemp();
         la_bstrpick_d(src, reg_s, 31, 0);
         switch (op) {
         case LATA_LSE_ADD: la_amadd_w(reg_t, src, reg_n); break;
@@ -5389,7 +5395,15 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
         }
         la_bstrpick_d(reg_t, reg_t, 31, 0);
     } else {
+        if (arm_la_map[a->rs] >= 0) {
+            src = ra_alloc_itemp();
+        } else {
+            src = reg_s;
+            src_alias_reg_s = true;
+        }
+        /* gen_lse_atomic_narrow_llsc() takes ownership of reg_n. */
         gen_lse_atomic_narrow_llsc(reg_t, reg_n, reg_s, src, dest, a->sz, op);
+        reg_n_freed = true;
     }
 
     if (acquire) {
@@ -5401,8 +5415,12 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
     }
     free_alloc_gpr(reg_s);
     free_alloc_gpr(reg_t);
-    free_alloc_gpr(reg_n);
-    free_alloc_gpr(src);
+    if (!reg_n_freed) {
+        free_alloc_gpr(reg_n);
+    }
+    if (!src_alias_reg_s) {
+        free_alloc_gpr(src);
+    }
     free_alloc_gpr(dest);
     return true;
 }
