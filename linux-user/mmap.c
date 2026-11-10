@@ -312,6 +312,18 @@ static abi_ulong mmap_find_vma_reserved(abi_ulong start, abi_ulong size,
 {
     target_ulong ret;
 
+    /*
+     * A hint above the reserved window must be clamped: with reserved_va the
+     * guest address space is [0, reserved_va], and page_find_range_empty()
+     * asserts min <= max.  A high hint (common for mmap with MAP_FIXED-less
+     * top-down allocation) otherwise trips that assertion.  Clamping to
+     * reserved_va makes the first probe fail immediately and the second
+     * probe below search the whole window.
+     */
+    if (start > reserved_va) {
+        start = reserved_va;
+    }
+
     ret = page_find_range_empty(start, reserved_va, size, align);
     if (ret == -1 && start > mmap_min_addr) {
         /* Restart at the beginning of the address space. */

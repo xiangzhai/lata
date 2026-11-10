@@ -980,6 +980,19 @@ int main(int argc, char **argv, char **envp)
     } else if (HOST_LONG_BITS == 64 && TARGET_VIRT_ADDR_SPACE_BITS <= 32) {
         /* MAX_RESERVED_VA + 1 is a large power of 2, so is aligned. */
         reserved_va = max_reserved_va;
+    } else if (HOST_LONG_BITS == 64 && TARGET_VIRT_ADDR_SPACE_BITS > 32) {
+        /*
+         * LATA emits native LoongArch loads/stores using the guest address
+         * directly, so the guest address space must be kept apart from
+         * QEMU's own code, heap, stack and translation buffers.  Reserve a
+         * 256GB identity-mapped window (the same default LATX uses for
+         * x86_64).  Any invalid guest address then faults cleanly and is
+         * reported as a guest SIGSEGV instead of corrupting QEMU memory.
+         *
+         * reserved_va stores "size - 1" (inclusive max guest address), so
+         * a 256GB window is 0x4000000000 - 1.
+         */
+        reserved_va = 0x3ffffffffful;
     }
 
     /*

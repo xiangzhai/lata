@@ -2682,6 +2682,45 @@ static void pgb_fixed(const char *image_name, uintptr_t guest_loaddr,
     }
 }
 
+static void pgb_reserved_va(const char *image_name, abi_ulong guest_loaddr,
+                            abi_ulong guest_hiaddr, long align)
+{
+    int flags = MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE;
+    void *addr, *test;
+
+    (void)align;
+    (void)guest_loaddr;
+
+    if (guest_hiaddr > reserved_va) {
+        error_report("%s: requires more than reserved virtual "
+                     "address space (0x%" PRIx64 " > 0x%lx)",
+                     image_name, (uint64_t)guest_hiaddr, reserved_va);
+        exit(EXIT_FAILURE);
+    }
+
+    /*
+     * LATA emits native LoongArch loads/stores using the guest address
+     * directly, so the mapping must be identity (guest_base == 0).  Reserve
+     * [mmap_min_addr, reserved_va] so QEMU's own code, heap, stack and
+     * translation buffers cannot land inside the guest address space.
+     * Leave [0, mmap_min_addr) unmapped so guest NULL dereferences fault.
+     */
+    guest_base = 0;
+
+    /* reserved_va is "size - 1", so the window spans
+     * [mmap_min_addr, reserved_va] inclusive. */
+    test = g2h_untagged(mmap_min_addr);
+    addr = mmap(test, reserved_va - mmap_min_addr + 1, PROT_NONE, flags, -1, 0);
+    if (addr != test) {
+        error_report("Unable to reserve 0x%lx bytes of virtual address "
+                     "space at %p (%s) for use as guest address space "
+                     "(check your virtual memory ulimit setting, "
+                     "mmap_min_addr or reserve less using -R option)",
+                     reserved_va - mmap_min_addr + 1, test, strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+}
+
 /**
  * pgb_find_fallback:
  *
@@ -2847,6 +2886,8 @@ void probe_guest_base(const char *image_name, abi_ulong guest_loaddr,
 
     if (have_guest_base) {
         pgb_fixed(image_name, guest_loaddr, guest_hiaddr, align);
+    } else if (reserved_va) {
+        pgb_reserved_va(image_name, guest_loaddr, guest_hiaddr, align);
     } else {
         pgb_dynamic(image_name, guest_loaddr, guest_hiaddr, align);
     }
