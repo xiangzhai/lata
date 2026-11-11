@@ -329,14 +329,33 @@ static void lata_gen_trace_mem_store(DisasContext *s, IR2_OPND addr,
 #endif
 }
 
+/*
+ * LATA emits native load/store instructions that bypass QEMU's TLB.  The
+ * guest is confined to the low reserved_va window (256 GiB, i.e. 38 bits for
+ * a 64-bit guest), while QEMU's own code/heap/stack/TB metadata live far
+ * above it.  If a guest address is ever wrong (or tagged), using it
+ * unmodified lets a native access hit QEMU's own mappings, corrupting the
+ * translator and other threads.  Confine every guest data/PC address to the
+ * window so such an access faults in guest space instead.  For valid guest
+ * addresses this is a no-op; TBI top-byte tags are cleared as part of it.
+ */
+static inline int lata_guest_va_msb(void)
+{
+    unsigned long limit = reserved_va;
+
+    return limit ? (63 - __builtin_clzl(limit)) : 63;
+}
+
+static inline void lata_confine_guest_addr(IR2_OPND dst, IR2_OPND src)
+{
+    la_bstrpick_d(dst, src, lata_guest_va_msb(), 0);
+}
+
 static void lata_clean_data_tbi(DisasContext* s, IR2_OPND* dst, IR2_OPND* src, int tbi)
 {
-    if (tbi == 0) {
-        /* Load unmodified address */
-    } else {
-        /* lata only support user-mode, we don't need Sign-extend */
-        la_bstrpick_d(*dst, *src, 56, 0);
-    }
+    (void)s;
+    (void)tbi;
+    lata_confine_guest_addr(*dst, *src);
 }
 
 static void lata_clean_pc_tbi(DisasContext *s, IR2_OPND dst, IR2_OPND src)
@@ -370,13 +389,14 @@ static void lata_clean_pc_tbi(DisasContext *s, IR2_OPND dst, IR2_OPND src)
         }
         free_alloc_gpr(clean);
     }
+    lata_confine_guest_addr(dst, dst);
 }
 
 static void lata_compute_reg_offset_addr(IR2_OPND dst, IR2_OPND base,
                                          IR2_OPND offset)
 {
     la_add_d(dst, base, offset);
-    la_bstrpick_d(dst, dst, 47, 0);
+    lata_confine_guest_addr(dst, dst);
 }
 
 static void store_gpr_dst_w_dirty(int reg, IR2_OPND opnd)
@@ -3249,6 +3269,8 @@ static void lata_load_exclusive(DisasContext* s, int rt, int rt2, int rn,
     IR2_OPND reg_t = alloc_gpr_dst(rt);
     IR2_OPND reg_t2;
 
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
+
     if (clearGprHigh && arm_la_map[rn] >= 0) { /* all reg_n is 64-bit size*/
         clear_gpr_high(rn);
     }
@@ -3345,6 +3367,8 @@ static void lata_store_exclusive(DisasContext* s, int rs, int rt, int rt2,
     IR2_OPND reg_n = alloc_gpr_src_sp(rn);
     IR2_OPND reg_t = alloc_gpr_src(rt);
     IR2_OPND reg_t2;
+
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
 
     if (clearGprHigh && arm_la_map[rn] >= 0) { /* all reg_n is 64-bit size*/
         clear_gpr_high(rn);
@@ -3523,6 +3547,8 @@ static bool trans_STLR(DisasContext* s)
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
     IR2_OPND reg_t = alloc_gpr_src(a->rt);
 
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
+
     if (clearGprHigh && arm_la_map[a->rn] >= 0) { /* all reg_n is 64-bit size*/
         clear_gpr_high(a->rn);
     }
@@ -3586,6 +3612,8 @@ static bool trans_LDAR(DisasContext* s)
     if (!a->lasr && !dc_isar_feature(aa64_lor, s)) {
         return false;
     }
+
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
     /* Generate ISS for non-exclusive accesses including LASR.  */
     if (a->rn == 31) {
         gen_check_sp_alignment(s);
@@ -3648,6 +3676,8 @@ static bool trans_CASP(DisasContext* s)
 
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
     IR2_OPND cmp_lo_in = alloc_gpr_src(a->rs);
+
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
     IR2_OPND cmp_hi_in = alloc_gpr_src(a->rs + 1);
     IR2_OPND new_lo_in = alloc_gpr_src(a->rt);
     IR2_OPND new_hi_in = alloc_gpr_src(a->rt + 1);
@@ -3772,6 +3802,8 @@ static bool trans_CAS(DisasContext* s)
     IR2_OPND dest = ra_alloc_itemp();
     IR2_OPND label_exit = ir2_opnd_new_type(IR2_OPND_LABEL);
     IR2_OPND label_ll = ir2_opnd_new_type(IR2_OPND_LABEL);
+
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
 
     if (a->rn == 31) {
         gen_check_sp_alignment(s);
@@ -5258,10 +5290,11 @@ typedef enum LATALseAtomicOp {
  */
 static QemuSpin lata_narrow_atomic_lock;
 
-uint64_t lata_narrow_atomic(uint64_t addr, uint64_t operand, uint32_t sz,
-                            uint32_t op)
+static uint64_t lata_narrow_atomic(uint64_t addr, uint64_t operand,
+                                   uint32_t sz, uint32_t op)
 {
-    void *p = (void *)(uintptr_t)addr;
+    uint64_t limit = reserved_va ? reserved_va : UINT64_MAX;
+    void *p = (void *)(uintptr_t)(addr & limit);
     uint64_t old;
 
     qemu_spin_lock(&lata_narrow_atomic_lock);
@@ -5326,6 +5359,7 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
 
         lata_gen_call_helper_prologue(tcg_ctx);
         la_ld_d(a0_ir2_opnd, env_ir2_opnd, env_offset_gpr(a->rn));
+        lata_confine_guest_addr(a0_ir2_opnd, a0_ir2_opnd);
         if (a->rs == 31) {
             la_mov64(a1_ir2_opnd, zero_ir2_opnd);
         } else {
@@ -5366,6 +5400,8 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
     IR2_OPND reg_t = a->rt == 31 ? ra_alloc_itemp() : alloc_gpr_dst(a->rt);
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
     IR2_OPND src = ra_alloc_itemp();
+
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
 
     if (release) {
         la_dbar(0);
@@ -5590,6 +5626,8 @@ static bool trans_LD_mult(DisasContext* s)
         clear_gpr_high(a->rn);
     }
 
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
+
     if (a->selem == 1) {              /* LD1(multiple structures) */
         int vbytes = (a->q ? 16 : 8); /* bytes per vector */
         total = a->rpt * vbytes;
@@ -5707,6 +5745,8 @@ static bool trans_ST_mult(DisasContext* s)
         clear_gpr_high(a->rn);
     }
 
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
+
     if (a->selem == 1) {              /* ST1(multiple structures) */
         int vbytes = (a->q ? 16 : 8); /* bytes per vector */
         total = a->rpt * vbytes;
@@ -5797,6 +5837,8 @@ static bool trans_ST_single(DisasContext* s)
         clear_gpr_high(a->rn);
     }
 
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
+
     for (xs = 0, rt = a->rt; xs < a->selem; xs++, rt = (rt + 1) % 32) {
         vreg_d = alloc_fpr_src(rt);
         IR2_OPND scratch = ra_alloc_itemp();
@@ -5850,6 +5892,8 @@ static bool trans_LD_single(DisasContext* s)
     if (clearGprHigh && arm_la_map[a->rn] >= 0) { /* all reg_n is 64-bit size*/
         clear_gpr_high(a->rn);
     }
+
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
 
     vtemp = ra_alloc_ftemp();
     IR2_OPND scratch = ra_alloc_itemp();
@@ -5924,6 +5968,8 @@ static bool trans_LD_single_repl(DisasContext* s)
     if (clearGprHigh && arm_la_map[a->rn] >= 0) { /* all reg_n is 64-bit size*/
         clear_gpr_high(a->rn);
     }
+
+    lata_clean_data_tbi(s, &reg_n, &reg_n, s->tbid);
 
     for (xs = 0, rt = a->rt; xs < a->selem; xs++, rt = (rt + 1) % 32) {
         IR2_OPND scratch = ra_alloc_itemp();
@@ -22298,6 +22344,16 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
     lata_df_begin_translate(tb);
     lata_vec_dirty_reset();
     for (i = 0; i < ir1_nr; ++i) {
+        /*
+         * ir1_nr lives in a callee-saved register across the translate call.
+         * If host state is ever corrupted, the cached bound can become huge
+         * and walk past the ir1 slice into uninitialised scratch.  tb->icount
+         * is the authoritative value and is not cached, so use it to bound
+         * the loop as well.
+         */
+        if (unlikely(i >= (int)tb->icount)) {
+            break;
+        }
 #ifdef CONFIG_LATA_TU
         tu_base = *pir1->base;
         tu_base.tb = tb;
