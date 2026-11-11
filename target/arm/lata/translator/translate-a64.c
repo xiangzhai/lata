@@ -2084,6 +2084,8 @@ static bool trans_AUTIBSP(DisasContext* s)
     return true;
 }
 
+static void lata_env_st_d_large(IR2_OPND val, int field_offset);
+
 static bool trans_CLREX(DisasContext* s)
 {
     /* Clear exclusive monitor by consuming LLbit with a dummy SC.
@@ -2098,6 +2100,10 @@ static bool trans_CLREX(DisasContext* s)
 
     la_ll_d(val, addr, 0); /* LL.D to overwrite lladdr with env field address */
     la_sc_d(val, addr, 0); /* SC.D consumes LLbit — clears exclusive monitor */
+
+    /* Also clear the software exclusive monitor used by LDXP/STXP. */
+    li_d(val, (uint64_t)-1);
+    lata_env_st_d_large(val, env_offset(exclusive_addr));
 
     free_alloc_gpr(addr);
     free_alloc_gpr(val);
@@ -3261,6 +3267,47 @@ static void lata_store_gpr_by_size(IR2_OPND* reg_t, IR2_OPND* reg_n, int64_t off
     }
 }
 
+/*
+ * 128-bit exclusive pair store (STXP).  AArch64 requires the pair store to
+ * be atomic, but LoongArch has no 128-bit LL/SC, so two 64-bit SC.D cannot
+ * implement it without tearing.  Record the pair in env on LDXP and do the
+ * compare-exchange here under a process-wide lock, mirroring the stock
+ * tcg_gen_atomic_cmpxchg_i128 implementation.
+ */
+static QemuSpin lata_pair_excl_lock;
+
+static uint64_t lata_stxp_pair(CPUARMState *env, uint64_t addr,
+                               uint64_t new_lo, uint64_t new_hi)
+{
+    uint64_t limit = reserved_va ? reserved_va : UINT64_MAX;
+    uint64_t *p = (uint64_t *)(uintptr_t)(addr & limit);
+    uint64_t result = 1;
+
+    if (env->exclusive_addr == addr) {
+        qemu_spin_lock(&lata_pair_excl_lock);
+        if (p[0] == env->exclusive_val && p[1] == env->exclusive_high) {
+            p[0] = new_lo;
+            p[1] = new_hi;
+            result = 0;
+        }
+        qemu_spin_unlock(&lata_pair_excl_lock);
+    }
+    env->exclusive_addr = -1;
+    return result;
+}
+
+/* Store/load a 64-bit value at an env field whose offset may exceed the
+ * 12-bit signed immediate of la_st_d / la_ld_d. */
+static void lata_env_st_d_large(IR2_OPND val, int field_offset)
+{
+    IR2_OPND temp = ra_alloc_itemp();
+
+    li_d(temp, field_offset);
+    la_add_d(temp, env_ir2_opnd, temp);
+    la_st_d(val, temp, 0);
+    free_alloc_gpr(temp);
+}
+
 static void lata_load_exclusive(DisasContext* s, int rt, int rt2, int rn,
     int size, bool is_pair)
 {
@@ -3290,15 +3337,21 @@ static void lata_load_exclusive(DisasContext* s, int rt, int rt2, int rn,
                 la_bstrpick_d(reg_t2, reg_t2, 31, 0);
             }
         } else {
-            /* size==3 (64-bit pair): LL.D for first value + LD.D for second.
-             * LLbit is set for the first 8 bytes; SC.Q later checks it for 128-bit store. */
+            /* size==3 (64-bit pair): load both words with plain loads and
+             * record the exclusive monitor in env so the matching STXP can
+             * do an atomic 128-bit compare-exchange in a helper. */
             if (s->be_data == MO_LE) {
-                la_ll_d(reg_t, reg_n, 0);
+                la_ld_d(reg_t, reg_n, 0);
                 la_ld_d(reg_t2, reg_n, 8);
+                lata_env_st_d_large(reg_t, env_offset(exclusive_val));
+                lata_env_st_d_large(reg_t2, env_offset(exclusive_high));
             } else {
-                la_ll_d(reg_t2, reg_n, 0);
+                la_ld_d(reg_t2, reg_n, 0);
                 la_ld_d(reg_t, reg_n, 8);
+                lata_env_st_d_large(reg_t2, env_offset(exclusive_val));
+                lata_env_st_d_large(reg_t, env_offset(exclusive_high));
             }
+            lata_env_st_d_large(reg_n, env_offset(exclusive_addr));
         }
         if (rt2 != 31 && arm_la_map[rt2] >= 0 && clearGprHigh) {
             set_w_write_flag(rt2, TRUE);
@@ -3392,33 +3445,46 @@ static void lata_store_exclusive(DisasContext* s, int rs, int rt, int rt2,
                 la_sc_d(reg_s, reg_n, 0);
             }
         } else {
-            /* size==3 (64-bit pair): use LL->SC per element.
-             * Re-establish LLbit before each SC since SC consumes it. */
-            IR2_OPND tmp = ra_alloc_itemp();
-            IR2_OPND tmp2 = ra_alloc_itemp();
+            /* size==3 (64-bit pair): atomic 128-bit compare-exchange helper.
+             * Two 64-bit SC.D cannot store 16 bytes atomically. */
+            IR2_OPND helper = ra_alloc_itemp();
+
+            lata_gen_call_helper_prologue(tcg_ctx);
+            la_mov64(a0_ir2_opnd, env_ir2_opnd);
+            la_ld_d(a1_ir2_opnd, env_ir2_opnd, env_offset_gpr(rn));
+            lata_confine_guest_addr(a1_ir2_opnd, a1_ir2_opnd);
+
             if (s->be_data == MO_LE) {
-                la_or(reg_s, reg_t, zero_ir2_opnd);
-                la_sc_d(reg_s, reg_n, 0);
-                la_xori(reg_s, reg_s, 1); /* invert LoongArch SC result to ARM convention */
-
-                la_or(tmp, reg_t2, zero_ir2_opnd);
-                la_ll_d(tmp2, reg_n, 8);
-                la_sc_d(tmp, reg_n, 8);
-                la_xori(tmp, tmp, 1);
-                la_or(reg_s, reg_s, tmp); /* OR: fail if either element fails */
+                if (rt == 31) {
+                    la_mov64(a2_ir2_opnd, zero_ir2_opnd);
+                } else {
+                    la_ld_d(a2_ir2_opnd, env_ir2_opnd, env_offset_gpr(rt));
+                }
+                if (rt2 == 31) {
+                    la_mov64(a3_ir2_opnd, zero_ir2_opnd);
+                } else {
+                    la_ld_d(a3_ir2_opnd, env_ir2_opnd, env_offset_gpr(rt2));
+                }
             } else {
-                la_or(reg_s, reg_t2, zero_ir2_opnd);
-                la_sc_d(reg_s, reg_n, 0);
-                la_xori(reg_s, reg_s, 1);
-
-                la_or(tmp, reg_t, zero_ir2_opnd);
-                la_ll_d(tmp2, reg_n, 8);
-                la_sc_d(tmp, reg_n, 8);
-                la_xori(tmp, tmp, 1);
-                la_or(reg_s, reg_s, tmp);
+                if (rt2 == 31) {
+                    la_mov64(a2_ir2_opnd, zero_ir2_opnd);
+                } else {
+                    la_ld_d(a2_ir2_opnd, env_ir2_opnd, env_offset_gpr(rt2));
+                }
+                if (rt == 31) {
+                    la_mov64(a3_ir2_opnd, zero_ir2_opnd);
+                } else {
+                    la_ld_d(a3_ir2_opnd, env_ir2_opnd, env_offset_gpr(rt));
+                }
             }
-            free_alloc_gpr(tmp);
-            free_alloc_gpr(tmp2);
+
+            li_d(helper, (uint64_t)lata_stxp_pair);
+            la_jirl(ra_ir2_opnd, helper, 0);
+            la_st_d(a0_ir2_opnd, env_ir2_opnd, env_offset(exclusive_memdata));
+            lata_gen_call_helper_epilogue(tcg_ctx);
+
+            la_ld_d(reg_s, env_ir2_opnd, env_offset(exclusive_memdata));
+            free_alloc_gpr(helper);
         }
         free_alloc_gpr(reg_t2);
     } else {
