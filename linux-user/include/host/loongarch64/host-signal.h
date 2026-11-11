@@ -77,6 +77,7 @@ static inline bool host_signal_write(siginfo_t *info, host_sigcontext *uc)
         break;
     case 0b001110: /* indexed, atomic, bounds-checking memory operations */
         switch ((insn >> 15) & 0b11111111111) {
+        case 0b01010111000: /* sc.q */
         case 0b00000100000: /* stx.b */
         case 0b00000101000: /* stx.h */
         case 0b00000110000: /* stx.w */
