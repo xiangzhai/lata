@@ -12268,7 +12268,11 @@ static void handle_scalar_simd_shli(DisasContext* s, bool insert,
         /* shift=0: mask>>64 = 0; result = vn */
         la_vori_b(vreg_d, vreg_n, 0);
     } else {
-        la_vfcmp_cond_d(vreg_mask, vreg_n, vreg_n, FCMP_COND_SEQ);
+        /* All-ones mask for the low (esize - shift) bits.  Do not derive it
+         * from a floating-point self-compare: NaN bit patterns compare
+         * unequal and would incorrectly clear lanes. */
+        la_vxor_v(vreg_mask, vreg_mask, vreg_mask);
+        la_vnori_b(vreg_mask, vreg_mask, 0);
         la_vsrli_d(vreg_mask, vreg_mask, 64 - shift);
 
         la_vand_v(vreg_temp, vreg_d, vreg_mask);
@@ -16181,7 +16185,11 @@ static void handle_vec_simd_shli(DisasContext* s, bool is_q, bool insert,
             /* shift=0: mask>>esize = 0; vd = vn */
             la_vori_b(vreg_d, vreg_n, 0);
         } else {
-            la_vfcmp_cond_d(vreg_mask, vreg_n, vreg_n, FCMP_COND_SEQ);
+            /* All-ones mask, then shifted down to the low (esize - shift)
+             * bits.  A floating-point self-compare cannot be used here: it
+             * yields zero for NaN bit patterns and corrupts SLI results. */
+            la_vxor_v(vreg_mask, vreg_mask, vreg_mask);
+            la_vnori_b(vreg_mask, vreg_mask, 0);
             switch (size) {
                 case 0:
                     la_vsrli_b(vreg_mask, vreg_mask, esize - shift);
