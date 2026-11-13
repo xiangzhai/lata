@@ -366,7 +366,7 @@ int ir2_to_string(IR2_INST *ir2, char *str)
     return length;
 }
 
-static int ir1_id;
+static __thread int ir1_id;
 
 int ir2_dump(IR2_INST *ir2)
 {

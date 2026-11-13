@@ -9209,6 +9209,83 @@ _syscall5(int, sys_move_mount, int, __from_dfd, const char *, __from_pathname,
  * of syscall results, can be performed.
  * All errnos that do_syscall() returns must be -TARGET_<errcode>.
  */
+
+/*
+ * process_vm_readv/writev for Darling under qemu-user.
+ *
+ * When every guest process is started with -B 0 (identity guest_base), a
+ * guest virtual address is also a host virtual address in that qemu process.
+ * The target PID is the host PID of the other qemu process, so the host
+ * process_vm_*v syscall can be used directly once the guest iovec arrays are
+ * copied out.  This is what lets darlingserver read/write a guest process's
+ * memory across qemu-user processes.
+ */
+static abi_long do_process_vm_rw(CPUArchState *cpu_env, int num, abi_long pid,
+                                 abi_long local_iov, abi_long liovcnt,
+                                 abi_long remote_iov, abi_long riovcnt,
+                                 abi_long flags)
+{
+    struct target_iovec *tliov = NULL, *triov = NULL;
+    struct iovec *liov = NULL, *riov = NULL;
+    abi_long ret = -TARGET_EINVAL;
+    int i;
+
+    if (guest_base != 0) {
+        return -TARGET_ENOSYS;
+    }
+    if (liovcnt < 0 || liovcnt > IOV_MAX ||
+        riovcnt < 0 || riovcnt > IOV_MAX) {
+        return -TARGET_EINVAL;
+    }
+
+    if (liovcnt > 0) {
+        tliov = lock_user(VERIFY_READ, local_iov,
+                          liovcnt * sizeof(struct target_iovec), 1);
+        if (!tliov) {
+            return -TARGET_EFAULT;
+        }
+    }
+    if (riovcnt > 0) {
+        triov = lock_user(VERIFY_READ, remote_iov,
+                          riovcnt * sizeof(struct target_iovec), 1);
+        if (!triov) {
+            ret = -TARGET_EFAULT;
+            goto out;
+        }
+    }
+
+    liov = g_new0(struct iovec, liovcnt > 0 ? liovcnt : 1);
+    riov = g_new0(struct iovec, riovcnt > 0 ? riovcnt : 1);
+
+    for (i = 0; i < liovcnt; i++) {
+        liov[i].iov_base = (void *)(uintptr_t)tswapal(tliov[i].iov_base);
+        liov[i].iov_len = tswapal(tliov[i].iov_len);
+    }
+    for (i = 0; i < riovcnt; i++) {
+        riov[i].iov_base = (void *)(uintptr_t)tswapal(triov[i].iov_base);
+        riov[i].iov_len = tswapal(triov[i].iov_len);
+    }
+
+    if (num == TARGET_NR_process_vm_writev) {
+        ret = get_errno(process_vm_writev(pid, liov, liovcnt,
+                                          riov, riovcnt, flags));
+    } else {
+        ret = get_errno(process_vm_readv(pid, liov, liovcnt,
+                                         riov, riovcnt, flags));
+    }
+
+out:
+    if (tliov) {
+        unlock_user(tliov, local_iov, 0);
+    }
+    if (triov) {
+        unlock_user(triov, remote_iov, 0);
+    }
+    g_free(liov);
+    g_free(riov);
+    return ret;
+}
+
 static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
                             abi_long arg2, abi_long arg3, abi_long arg4,
                             abi_long arg5, abi_long arg6, abi_long arg7,
@@ -11338,6 +11415,16 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             }
         }
         return ret;
+#if defined(TARGET_NR_process_vm_readv)
+    case TARGET_NR_process_vm_readv:
+        return do_process_vm_rw(cpu_env, num, arg1, arg2, arg3,
+                                arg4, arg5, arg6);
+#endif
+#if defined(TARGET_NR_process_vm_writev)
+    case TARGET_NR_process_vm_writev:
+        return do_process_vm_rw(cpu_env, num, arg1, arg2, arg3,
+                                arg4, arg5, arg6);
+#endif
 #if defined(TARGET_NR_preadv)
     case TARGET_NR_preadv:
         {

@@ -46,12 +46,17 @@ typedef struct LataPeepholePass {
     LataPeepholePassFn fn;
 } LataPeepholePass;
 
-static LataIR2PeepholeStats peephole_stats;
-static bool *protected_raw_branch_targets;
-static int protected_raw_branch_targets_len;
-static int *raw_branch_old_id_to_index;
-static int *raw_branch_old_index_to_id;
-static int raw_branch_old_count;
+/*
+ * TB assembly may run concurrently for different guest threads.  These
+ * scratch arrays describe the IR2 stream currently being optimized, so they
+ * must not be shared between threads.
+ */
+static __thread LataIR2PeepholeStats peephole_stats;
+static __thread bool *protected_raw_branch_targets;
+static __thread int protected_raw_branch_targets_len;
+static __thread int *raw_branch_old_id_to_index;
+static __thread int *raw_branch_old_index_to_id;
+static __thread int raw_branch_old_count;
 
 static bool ir2_is_zero_gpr(const IR2_OPND *opnd)
 {

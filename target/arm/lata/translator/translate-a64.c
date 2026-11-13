@@ -1557,6 +1557,22 @@ static void gen_sub_CC(IR2_OPND* src1, IR2_OPND* src2, int sf)
     }
 }
 
+/* AArch64 logical instructions (ANDS/BICS) set C=1 and V=0, while the
+ * x86-style flag helper clears C like an x86 AND.  Preserve N/Z/V and force
+ * the architectural carry result. */
+static void lata_logical_flags_set_carry(void)
+{
+    IR2_OPND flags = ra_alloc_itemp();
+    IR2_OPND bit = ra_alloc_itemp();
+
+    la_armmfflag(flags, 0x39);
+    la_lu12i_w(bit, 0x20000); /* NZCV.C */
+    la_or(flags, flags, bit);
+    la_armmtflag(flags, 0x39);
+    free_alloc_gpr(flags);
+    free_alloc_gpr(bit);
+}
+
 static void gen_add(IR2_OPND* dst, IR2_OPND* src1, IR2_OPND* src2, int sf)
 {
     if (sf) {
@@ -2805,8 +2821,14 @@ static void lata_helper_access_check_sysReg(DisasContext* ctx, void* la_ri, uint
     li_d(temp, (uint64_t)helper_access_check_cp_reg);
     la_jirl(ra_ir2_opnd, temp, 0);
 
-    li_d(temp, (uint64_t)&la_ri);
-    la_st_d(a0_ir2_opnd, temp, 0);
+    /*
+     * Do not write the helper result (an ARMCPRegInfo host pointer) back to
+     * the translator's la_ri stack slot.  This code runs long after
+     * translation, so &la_ri is stale and the store corrupts whatever now
+     * lives at that stack location.  The later register access performs its
+     * own lookup because la_ri is NULL here.
+     */
+    (void)la_ri;
 
     lata_gen_call_helper_epilogue(tcg_ctx);
     free_alloc_gpr(temp);
@@ -6561,6 +6583,7 @@ static bool trans_ANDS_i(DisasContext* s)
     } else {
         la_x86and_d(reg_n, temp);
     }
+    lata_logical_flags_set_carry();
 
     store_gpr_dst_reg_width(a->rd, reg_d, a->sf);
     free_alloc_gpr(reg_n);
@@ -7001,6 +7024,7 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
                     } else {
                         la_x86and_w(reg_n, temp);
                     }
+                    lata_logical_flags_set_carry();
                 }
                 la_and(reg_d, reg_n, temp);
                 break;
@@ -7020,6 +7044,7 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
                     } else {
                         la_x86and_w(reg_n, temp);
                     }
+                    lata_logical_flags_set_carry();
                 }
                 break;
             case 5: /* ORN */
@@ -7043,6 +7068,7 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
                     } else {
                         la_x86and_w(reg_n, reg_m);
                     }
+                    lata_logical_flags_set_carry();
                 }
                 la_and(reg_d, reg_n, reg_m);
                 break;
@@ -7061,6 +7087,7 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
                     } else {
                         la_x86and_w(reg_n, temp);
                     }
+                    lata_logical_flags_set_carry();
                 }
                 la_andn(reg_d, reg_n, reg_m);
                 break;
@@ -22159,8 +22186,12 @@ static void set_base_isjump(DisasContext* s)
     }
 }
 
-static DisasContext ir1_list[TCG_MAX_INSNS];
-static DisasContextBase db_rel;
+/*
+ * Guest threads translate concurrently (each has its own TCG context), so the
+ * per-translation instruction buffer and its base state must be per-thread.
+ */
+static __thread DisasContext ir1_list[TCG_MAX_INSNS];
+static __thread DisasContextBase db_rel;
 
 /*
     generate ir1_list
