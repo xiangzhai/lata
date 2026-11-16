@@ -1582,17 +1582,20 @@ static void gen_sub_CC(IR2_OPND* src1, IR2_OPND* src2, int sf)
     }
 }
 
-/* AArch64 logical instructions (ANDS/BICS) set C=1 and V=0, while the
- * x86-style flag helper clears C like an x86 AND.  Preserve N/Z/V and force
- * the architectural carry result. */
+/*
+ * AArch64 logical instructions that set flags (ANDS/BICS/TST) update N and
+ * Z from the result and clear both C and V.  The x86-style flag helper has
+ * the same NZ semantics, but make the CV state explicit so stale carry from
+ * an earlier arithmetic instruction cannot leak into later CSV/CSINC users.
+ */
 static void lata_logical_flags_set_carry(void)
 {
     IR2_OPND flags = ra_alloc_itemp();
     IR2_OPND bit = ra_alloc_itemp();
 
     la_armmfflag(flags, 0x39);
-    la_lu12i_w(bit, 0x20000); /* NZCV.C */
-    la_or(flags, flags, bit);
+    la_lu12i_w(bit, 0x30000); /* NZCV.C | NZCV.V */
+    la_andn(flags, flags, bit);
     la_armmtflag(flags, 0x39);
     free_alloc_gpr(flags);
     free_alloc_gpr(bit);
