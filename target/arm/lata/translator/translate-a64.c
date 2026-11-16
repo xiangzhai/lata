@@ -7542,7 +7542,15 @@ static void disas_adc_sbc(DisasContext* s, uint32_t insn)
             }
         }
     } else {
+        /*
+         * rd may alias rn/rm.  In particular rd == rm with statically mapped
+         * registers (e.g. "adcs x19, x19, x19") makes adc.d overwrite the
+         * source before the flag helper runs.  Snapshot both operands in
+         * temps first so the x86adc below still sees the original values
+         * (the SBC path already works on ~rm and a copy of rn).
+         */
         la_or(temp2, reg_n, zero_ir2_opnd);
+        la_or(temp, reg_m, zero_ir2_opnd);
         if (sf) {
             la_adc_d(reg_d, reg_n, reg_m);
         } else {
@@ -7550,9 +7558,9 @@ static void disas_adc_sbc(DisasContext* s, uint32_t insn)
         }
         if (setflags) {
             if (sf) {
-                la_x86adc_d(temp2, reg_m);
+                la_x86adc_d(temp2, temp);
             } else {
-                la_x86adc_w(temp2, reg_m);
+                la_x86adc_w(temp2, temp);
             }
         }
     }

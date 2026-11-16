@@ -1598,37 +1598,26 @@ IR2_OPND alloc_gpr_src_sp_ro(int i)
 }
 
 IR2_OPND alloc_gpr_dst(int i) {
-    int index;
-
     if(i==31){
         return ir2_opnd_new(IR2_OPND_GPR, la_zero);
     }
     if (arm_la_map[i] >= 0) {
         return ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]);
     } else {
-        index = lata_gpr_cache_find(i);
-        if (index >= 0) {
-            /*
-             * The guest register is about to be overwritten, but it may also
-             * be a source of this instruction (rd == rn/rm).  Release the
-             * stale copy before allocating the destination temp.
-             */
-            lata_gpr_cache_flush_slot(index);
-        }
+        /*
+         * Do not invalidate the cached copy here.  The guest register may
+         * still be a source of this instruction (rd == rn/rm), and the old
+         * value must remain readable until the translator stores the result.
+         * The write path (store_gpr_dst/store_gpr_zero) replaces the slot.
+         */
         return ra_alloc_itemp();
     }
 }
 
 IR2_OPND alloc_gpr_dst_sp(int i) {
-    int index;
-
     if (arm_la_map[i] >= 0) {
         return ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]);
     } else {
-        index = lata_gpr_cache_find(i);
-        if (index >= 0) {
-            lata_gpr_cache_flush_slot(index);
-        }
         return ra_alloc_itemp();
     }
 }
