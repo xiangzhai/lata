@@ -257,6 +257,7 @@ struct TranslationBlock {
 #ifdef CONFIG_LATA
     void *lata_df_ir1;
     uint16_t lata_df_ir1_count;
+    bool lata_df_scratch;
     uint32_t lata_df_gpr_use;
     uint32_t lata_df_gpr_x_use;
     uint32_t lata_df_gpr_def;

@@ -36,7 +36,12 @@ typedef struct LataIR1DF {
 void lata_df_analyze_tb(TranslationBlock *tb);
 
 #ifdef CONFIG_LATA_TU
+void lata_df_scratch_begin(void);
+void lata_df_scratch_end(void);
 void lata_df_analyze_tu(TranslationBlock **tb_list, uint32_t tb_count);
+#else
+static inline void lata_df_scratch_begin(void) {}
+static inline void lata_df_scratch_end(void) {}
 #endif
 
 void lata_df_begin_translate(TranslationBlock *tb);

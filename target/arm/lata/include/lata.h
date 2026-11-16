@@ -16,7 +16,7 @@
 //#include "env.h"
 
 #define B_STUB_SIZE 12
-#define LATA_GPR_CACHE_MAX 3
+#define LATA_GPR_CACHE_MAX 6
 
 typedef enum LataFAMMode {
     LATA_FAM_OFF = -1,
@@ -70,6 +70,7 @@ typedef struct TRANSLATION_DATA {
     int ir2_inst_num_max;
     int ir2_inst_num_current;
     int real_ir2_inst_num;
+    bool peephole_candidate;
 
     /* the list of ir2 */
     IR2_INST *first_ir2;

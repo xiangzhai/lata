@@ -4,6 +4,7 @@
 #ifdef CONFIG_LATA_TU
 
 #define MAX_TB_IN_TU 50
+#define LATA_TU_EXPLORE_LIMIT 16
 #define MAX_TB_IN_CACHE (MAX_TB_IN_TU + 10)
 #define MAX_TB_SIZE 10240
 #define MAX_TU_SIZE (MAX_TB_IN_TU * MAX_TB_SIZE)

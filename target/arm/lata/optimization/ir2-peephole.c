@@ -1123,7 +1123,14 @@ static LataPeepholePassResult run_combined_pass(IR2_INST *ir2)
 void lata_ir2_peephole_run(void)
 {
     IR2_INST *ir2;
-    uint64_t removed_before = peephole_stats.removed_total;
+    uint64_t removed_before;
+
+    if (!lsenv->tr_data->peephole_candidate) {
+        clear_raw_branch_protection();
+        return;
+    }
+
+    removed_before = peephole_stats.removed_total;
 
     peephole_stats.runs++;
 

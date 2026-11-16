@@ -15,6 +15,35 @@ typedef struct LataActiveDF {
 
 static __thread LataActiveDF active_df;
 
+#ifdef CONFIG_LATA_TU
+#define LATA_DF_SCRATCH_SLOTS ((MAX_TB_IN_TU + 2) * TCG_MAX_INSNS)
+
+typedef struct LataDFScratch {
+    LataIR1DF *slots;
+    uint32_t capacity;
+    uint32_t used;
+    bool in_use;
+} LataDFScratch;
+
+static __thread LataDFScratch df_scratch;
+
+void lata_df_scratch_begin(void)
+{
+    if (!df_scratch.slots) {
+        df_scratch.slots = g_new(LataIR1DF, LATA_DF_SCRATCH_SLOTS);
+        df_scratch.capacity = LATA_DF_SCRATCH_SLOTS;
+    }
+    df_scratch.used = 0;
+    df_scratch.in_use = true;
+}
+
+void lata_df_scratch_end(void)
+{
+    df_scratch.used = 0;
+    df_scratch.in_use = false;
+}
+#endif
+
 enum {
     LATA_NZCV_N = 1u << 3,
     LATA_NZCV_Z = 1u << 2,
@@ -1642,6 +1671,7 @@ void lata_df_reset_tb(TranslationBlock *tb)
     }
     tb->lata_df_ir1 = NULL;
     tb->lata_df_ir1_count = 0;
+    tb->lata_df_scratch = false;
 }
 
 void lata_df_free_tb(TranslationBlock *tb)
@@ -1649,7 +1679,9 @@ void lata_df_free_tb(TranslationBlock *tb)
     if (!tb || !tb->lata_df_ir1) {
         return;
     }
-    g_free(tb->lata_df_ir1);
+    if (!tb->lata_df_scratch) {
+        g_free(tb->lata_df_ir1);
+    }
     lata_df_reset_tb(tb);
 }
 
@@ -1657,13 +1689,27 @@ static LataIR1DF *lata_df_alloc_ir1(TranslationBlock *tb)
 {
     lsassert(tb->icount <= TCG_MAX_INSNS);
     if (tb->lata_df_ir1_count != tb->icount) {
-        g_free(tb->lata_df_ir1);
+        if (!tb->lata_df_scratch) {
+            g_free(tb->lata_df_ir1);
+        }
         tb->lata_df_ir1 = NULL;
         tb->lata_df_ir1_count = 0;
+        tb->lata_df_scratch = false;
     }
     if (!tb->lata_df_ir1 && tb->icount) {
+#ifdef CONFIG_LATA_TU
+        if (df_scratch.in_use &&
+            df_scratch.used + tb->icount <= df_scratch.capacity) {
+            tb->lata_df_ir1 = df_scratch.slots + df_scratch.used;
+            df_scratch.used += tb->icount;
+            tb->lata_df_ir1_count = tb->icount;
+            tb->lata_df_scratch = true;
+            return tb->lata_df_ir1;
+        }
+#endif
         tb->lata_df_ir1 = g_new0(LataIR1DF, tb->icount);
         tb->lata_df_ir1_count = tb->icount;
+        tb->lata_df_scratch = false;
     }
     return tb->lata_df_ir1;
 }

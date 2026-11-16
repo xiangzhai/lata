@@ -340,10 +340,24 @@ void ir2_build(IR2_INST *ir2, IR2_OPCODE opcode, IR2_OPND opnd0, IR2_OPND opnd1,
     ir2->_opnd[3] = ir2_opnd_new_none();
 }
 
+static const bool ir2_opcode_peephole_candidate[LISA_ENDING + 1] = {
+    [LISA_BSTRPICK_D] = true,
+    [LISA_BSTRPICK_W] = true,
+    [LISA_ADDI_D] = true,
+    [LISA_ADD_D] = true,
+    [LISA_XOR] = true,
+    [LISA_OR] = true,
+};
+
 void ir2_append(IR2_INST *ir2)
 {
     TRANSLATION_DATA *t = lsenv->tr_data;
     IR2_INST *former_last = t->last_ir2;
+
+    if ((uint16_t)ir2->_opcode <= LISA_ENDING &&
+        ir2_opcode_peephole_candidate[(uint16_t)ir2->_opcode]) {
+        t->peephole_candidate = true;
+    }
 
     if (former_last != NULL) {
         lsassert(t->first_ir2 != NULL);

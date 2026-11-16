@@ -144,6 +144,7 @@ static inline void tu_enough_space(CPUState *cpu)
         cpu->exception_index = EXCP_INTERRUPT;
         cpu_loop_exit(cpu);
     }
+    tcg_pool_reset(tcg_ctx);
     tcg_ctx->gen_insn_data = tcg_malloc(sizeof(uint64_t) * MAX_TB_IN_TU * TCG_MAX_INSNS * TARGET_INSN_START_WORDS);
 }
 
@@ -430,7 +431,7 @@ static inline void get_tu_queue(CPUState *cpu,
     target_ulong direct_cs_base = tu_direct_branch_target_cs_base(flags,
                                                                  cs_base);
     TranslationBlock *next_tb, *target_tb, *tb;
-    for (int i = 0; i <  *tb_num_in_tu && *tb_num_in_tu < MAX_TB_IN_TU - 1; i++) {
+    for (int i = 0; i <  *tb_num_in_tu && *tb_num_in_tu < LATA_TU_EXPLORE_LIMIT - 1; i++) {
         tb = tb_list[i];
         if (tb->s_data->tu_tb_mode == TU_TB_MODE_SWITCH_TO_TB) {
             continue;
@@ -1690,6 +1691,7 @@ TranslationBlock *tu_gen_code(CPUState *cpu,
     assert_memory_lock();
     qemu_thread_jit_write();
     tu_scratch_begin();
+    lata_df_scratch_begin();
 
     /* 1.Search all TBs in the function */
     entry = tb_explore(cpu, pc, cs_base, flags, cflags);
@@ -1697,6 +1699,7 @@ TranslationBlock *tu_gen_code(CPUState *cpu,
     if (!translate_tu(tb_list)) {
         /* Generated code would overflow the current code buffer.  Flush and
          * let the caller retry with a fresh buffer. */
+        lata_df_scratch_end();
         tu_scratch_end();
         tb_flush(cpu);
         mmap_unlock();
@@ -1707,6 +1710,7 @@ TranslationBlock *tu_gen_code(CPUState *cpu,
     register_tu(tb_list, cpu, cflags);
     print_tu(cpu, tb_list);
     lata_debug_dump_tu(cpu, tb_list, tu_data->tb_num);
+    lata_df_scratch_end();
     tu_scratch_end();
     return entry;
 }

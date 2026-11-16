@@ -368,6 +368,7 @@ void tr_init(void* tb)
     t->ir2_inst_num_current = 0;
     //uint64 k = &(t->ir2_inst_num_current);
     t->real_ir2_inst_num = 0;
+    t->peephole_candidate = false;
 
     /* reset ir2 first/last/num */
     t->first_ir2 = NULL;

@@ -22220,12 +22220,20 @@ DisasContext* get_ir1_list(CPUState* cpu, TranslationBlock* tb, vaddr pc, int ma
 
     tcg_debug_assert(db->is_jmp == DISAS_NEXT); /* no early exit */
 
+    DisasContext init_ctx;
+
     while (true) {
         max_insns = db->num_insns;
         pir1 = &ir1_list[max_insns];
         pir1->base = db;
         pir1->insn_type = AARCH64_A64_NULL;
-        aarch64_tr_init_disas_context(pir1, cpu);
+        if (db->num_insns == 0) {
+            aarch64_tr_init_disas_context(pir1, cpu);
+            init_ctx = *pir1;
+        } else {
+            *pir1 = init_ctx;
+            pir1->base = db;
+        }
         tcg_debug_assert(db->is_jmp == DISAS_NEXT); /* no early exit */
 
         /* Disassemble one instruction.  The translate_insn hook should
