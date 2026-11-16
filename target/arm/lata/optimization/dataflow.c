@@ -1904,6 +1904,15 @@ void lata_df_analyze_tu(TranslationBlock **tb_list, uint32_t tb_count)
     bool changed;
 
     /*
+     * With dataflow optimisation disabled the liveness queries all return
+     * "live", so the fixed point below cannot change any code generation
+     * decision.  Skip the whole cross-TB pass in that case.
+     */
+    if (!option_lata_dataflow_opt) {
+        return;
+    }
+
+    /*
      * Each TB's per-IR1 facts are produced once by target_disasm(), which
      * calls lata_df_analyze_tb() when the TB is translated.  TBs reused from
      * an earlier TU already carry those facts too, and they never change for

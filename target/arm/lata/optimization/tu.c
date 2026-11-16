@@ -34,10 +34,59 @@ typedef struct LataTUScratch {
     uint32_t ir1_capacity;
     uint32_t ir1_used;
     bool in_use;
-    uint32_t search_buff_offset[MAX_TB_IN_TU];
 } LataTUScratch;
 
 static __thread LataTUScratch tu_scratch;
+
+/*
+ * Interactive guests that JIT (JSC/V8) patch code constantly.  Every patch
+ * invalidates TBs and sends the same entry pages back through TU creation.
+ * Translating all 16 eager successors for each of those re-translations is
+ * what makes a single key press expensive.  Track recent TU activity per
+ * page and shrink the eager exploration window once a page is being
+ * translated over and over; the remaining blocks are still translated
+ * lazily when they are actually reached.
+ */
+#define TU_PAGE_TRACK_SIZE      128
+#define TU_PAGE_TRACK_WINDOW    4096
+#define TU_PAGE_THROTTLE_COUNT  16
+#define TU_EAGER_LIMIT          LATA_TU_EXPLORE_LIMIT
+#define TU_LAZY_LIMIT           6
+
+typedef struct LataTUPageTrack {
+    target_ulong page;
+    uint32_t last_epoch;
+    uint32_t count;
+} LataTUPageTrack;
+
+static __thread LataTUPageTrack tu_page_track[TU_PAGE_TRACK_SIZE];
+static __thread uint32_t tu_page_epoch;
+static __thread uint32_t tu_explore_limit = TU_EAGER_LIMIT;
+
+static uint32_t tu_explore_limit_for_entry(target_ulong pc)
+{
+    LataTUPageTrack *track;
+    target_ulong page = pc & TARGET_PAGE_MASK;
+    uint32_t index;
+
+    tu_page_epoch++;
+    index = (page >> TARGET_PAGE_BITS) & (TU_PAGE_TRACK_SIZE - 1);
+    track = &tu_page_track[index];
+
+    if (track->page == page &&
+        tu_page_epoch - track->last_epoch < TU_PAGE_TRACK_WINDOW) {
+        if (track->count != UINT32_MAX) {
+            track->count++;
+        }
+    } else {
+        track->page = page;
+        track->count = 1;
+    }
+    track->last_epoch = tu_page_epoch;
+
+    return track->count >= TU_PAGE_THROTTLE_COUNT ? TU_LAZY_LIMIT :
+                                                    TU_EAGER_LIMIT;
+}
 
 static void tu_scratch_begin(void)
 {
@@ -145,7 +194,6 @@ static inline void tu_enough_space(CPUState *cpu)
         cpu_loop_exit(cpu);
     }
     tcg_pool_reset(tcg_ctx);
-    tcg_ctx->gen_insn_data = tcg_malloc(sizeof(uint64_t) * MAX_TB_IN_TU * TCG_MAX_INSNS * TARGET_INSN_START_WORDS);
 }
 
 void lata_tu_edge_reset(TranslationBlock *tb, int n)
@@ -431,7 +479,8 @@ static inline void get_tu_queue(CPUState *cpu,
     target_ulong direct_cs_base = tu_direct_branch_target_cs_base(flags,
                                                                  cs_base);
     TranslationBlock *next_tb, *target_tb, *tb;
-    for (int i = 0; i <  *tb_num_in_tu && *tb_num_in_tu < LATA_TU_EXPLORE_LIMIT - 1; i++) {
+    for (int i = 0; i < *tb_num_in_tu &&
+             *tb_num_in_tu + 1 < tu_explore_limit; i++) {
         tb = tb_list[i];
         if (tb->s_data->tu_tb_mode == TU_TB_MODE_SWITCH_TO_TB) {
             continue;
@@ -801,6 +850,7 @@ static TranslationBlock *tb_explore(CPUState *cpu,
     }
     *tb_num_in_tu = 0;
     *ir1_num_in_tu = 0;
+    tu_explore_limit = tu_explore_limit_for_entry(pc);
 
     tu_enough_space(cpu);
     /* the entry used as return value*/
@@ -1585,16 +1635,12 @@ bool translate_tu(TranslationBlock **tb_list)
     lata_tu_move_unlink_stubs_to_cold_tail(tb_list, tb_num_in_tu);
     lata_tu_finalize_edges(tb_list, tb_num_in_tu);
 
-    uint32_t search_size = 0;
-    for (int i = 0; i < tb_num_in_tu; i++) {
-        tb = tb_list[i];
-        tu_scratch.search_buff_offset[i] = search_size;
-        search_size += encode_search(tb, (void *)(tcg_ctx->tb_gen_tail) +
-                                     tu_scratch.search_buff_offset[i]);
-        tb->tu_search_addr = (uint8_t *)
-            ((void *)(tcg_ctx->tb_gen_tail) +
-             tu_scratch.search_buff_offset[i]);
-    }
+    /*
+     * Search (unwind) data is not consumed for TU mode: host signal
+     * handling walks the generated code directly, and TU translation never
+     * wrote gen_insn_data.  Encoding it per TB used to walk uninitialised
+     * data and forced a per-TU ~200KB allocation, so skip it.
+     */
     tb_list[0]->s_data->tu_size = tcg_ctx->code_gen_ptr - tb_list[0]->tc.ptr;
     lata_debug_note_tu_generated(tb_num_in_tu, tb_list[0]->s_data->tu_size);
 #ifndef CONFIG_TCG_INTERPRETER

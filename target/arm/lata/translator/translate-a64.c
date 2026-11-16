@@ -355,6 +355,31 @@ static void lata_clean_data_tbi(DisasContext* s, IR2_OPND* dst, IR2_OPND* src, i
 {
     (void)s;
     (void)tbi;
+
+    /*
+     * The guest stack pointer always lives in the reserved window, so the
+     * common [sp, #imm] form does not need the truncation instruction.
+     */
+    if (ir2_opnd_base_reg_num(src) == arm_la_map[armv8_xzr]) {
+        if (ir2_opnd_base_reg_num(dst) != ir2_opnd_base_reg_num(src)) {
+            la_mov64(*dst, *src);
+        }
+        return;
+    }
+
+    /*
+     * Address confinement must not rewrite the guest register.  Mapped
+     * registers are already modified in place, but a cached source owns its
+     * host register, so copy it out before masking.
+     */
+    if (lata_gpr_cache_owns_opnd(*src)) {
+        IR2_OPND clean = ra_alloc_itemp();
+
+        lata_confine_guest_addr(clean, *src);
+        *dst = clean;
+        return;
+    }
+
     lata_confine_guest_addr(*dst, *src);
 }
 
@@ -4832,7 +4857,7 @@ static bool trans_LDR(DisasContext* s)
     arg_ldst* a = &(s->arg.f_ldst);
     IR2_OPND reg_t = alloc_gpr_dst(a->rt);
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
-    IR2_OPND reg_m = alloc_gpr_src(a->rm);
+    IR2_OPND reg_m = alloc_gpr_src_ro(a->rm);
     IR2_OPND temp = ra_alloc_itemp();
 
     /*  LDR (register)
@@ -4998,7 +5023,7 @@ static bool trans_STR(DisasContext* s)
     arg_ldst* a = &(s->arg.f_ldst);
     IR2_OPND reg_t = alloc_gpr_src(a->rt);
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
-    IR2_OPND reg_m = alloc_gpr_src(a->rm);
+    IR2_OPND reg_m = alloc_gpr_src_ro(a->rm);
     IR2_OPND temp = ra_alloc_itemp();
     int extsize = extract32(a->opt, 0, 2);
     bool is_signed = extract32(a->opt, 2, 1);
@@ -5131,7 +5156,7 @@ static bool trans_LDR_v(DisasContext* s)
     arg_ldst* a = &(s->arg.f_ldst);
     IR2_OPND vreg_t = alloc_fpr_dst(a->rt);
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
-    IR2_OPND reg_m = alloc_gpr_src(a->rm);
+    IR2_OPND reg_m = alloc_gpr_src_ro(a->rm);
     IR2_OPND temp = ra_alloc_itemp();
     bool high_clean = true;
 
@@ -5248,7 +5273,7 @@ static bool trans_STR_v(DisasContext* s)
     arg_ldst* a = &(s->arg.f_ldst);
     IR2_OPND vreg_t = alloc_fpr_src(a->rt);
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
-    IR2_OPND reg_m = alloc_gpr_src(a->rm);
+    IR2_OPND reg_m = alloc_gpr_src_ro(a->rm);
     IR2_OPND temp = ra_alloc_itemp();
     IR2_OPND temp1 = ra_alloc_itemp();
     int extsize = extract32(a->opt, 0, 2);
@@ -6176,7 +6201,7 @@ static bool trans_ADD_i(DisasContext* s)
 {
     arg_ADD_i* a = &(s->arg.f_rri_sf);
     IR2_OPND reg_d = alloc_gpr_dst_sp(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_sp_ro(a->rn);
     IR2_OPND temp = ir2_opnd_new_none();
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
@@ -6228,7 +6253,7 @@ static bool trans_SUB_i(DisasContext* s)
 {
     arg_SUB_i* a = &(s->arg.f_rri_sf);
     IR2_OPND reg_d = alloc_gpr_dst_sp(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_sp_ro(a->rn);
     IR2_OPND temp = ir2_opnd_new_none();
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
@@ -6280,7 +6305,7 @@ static bool trans_ADDS_i(DisasContext* s)
 {
     arg_ADDS_i* a = &(s->arg.f_rri_sf);
     IR2_OPND reg_d = alloc_gpr_dst(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_sp_ro(a->rn);
     IR2_OPND temp = ra_alloc_itemp();
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
@@ -6315,7 +6340,7 @@ static bool trans_SUBS_i(DisasContext* s)
 {
     arg_SUBS_i* a = &(s->arg.f_rri_sf);
     IR2_OPND reg_d = alloc_gpr_dst(a->rd);
-    IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
+    IR2_OPND reg_n = alloc_gpr_src_sp_ro(a->rn);
     IR2_OPND temp = ra_alloc_itemp();
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
@@ -6575,6 +6600,7 @@ static bool trans_ANDS_i(DisasContext* s)
     IR2_OPND reg_d = alloc_gpr_dst(a->rd);
     IR2_OPND reg_n = alloc_gpr_src_ro(a->rn);
     IR2_OPND temp = ra_alloc_itemp();
+    IR2_OPND flag_base = ra_alloc_itemp();
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
         clear_gpr_high(a->rn);
@@ -6582,10 +6608,11 @@ static bool trans_ANDS_i(DisasContext* s)
 
     li_d(temp, imm);
     la_and(reg_d, reg_n, temp);
+    la_mov64(flag_base, reg_n);
     if (!a->sf) {
-        la_x86and_w(reg_n, temp);
+        la_x86and_w(flag_base, temp);
     } else {
-        la_x86and_d(reg_n, temp);
+        la_x86and_d(flag_base, temp);
     }
     lata_logical_flags_set_carry();
 
@@ -6593,6 +6620,7 @@ static bool trans_ANDS_i(DisasContext* s)
     free_alloc_gpr(reg_n);
     free_alloc_gpr(reg_d);
     free_alloc_gpr(temp);
+    free_alloc_gpr(flag_base);
     return true;
 }
 
@@ -7011,9 +7039,20 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
 
     IR2_OPND reg_n = alloc_gpr_src_ro(rn);
     IR2_OPND temp = ra_alloc_itemp();
+    IR2_OPND flag_base = ir2_opnd_new_none();
 
     if (clearGprHigh && sf && arm_la_map[rn] >= 0 && rn != 31) {
         clear_gpr_high(rn);
+    }
+
+    /*
+     * reg_n may be a cached, shared copy of the guest register.  The x86
+     * flag helpers destroy their first operand, so compute the flags on a
+     * scratch copy instead of corrupting the cache.
+     */
+    if (opc == 3) {
+        flag_base = ra_alloc_itemp();
+        la_mov64(flag_base, reg_n);
     }
 
     if (shift_amount) {
@@ -7024,9 +7063,9 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
             case 3: /* ANDS */
                 if (opc == 3) {
                     if (sf) {
-                        la_x86and_d(reg_n, temp);
+                        la_x86and_d(flag_base, temp);
                     } else {
-                        la_x86and_w(reg_n, temp);
+                        la_x86and_w(flag_base, temp);
                     }
                     lata_logical_flags_set_carry();
                 }
@@ -7044,9 +7083,9 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
                 if (opc == 3) {
                     la_nor(temp, zero_ir2_opnd, temp);
                     if (sf) {
-                        la_x86and_d(reg_n, temp);
+                        la_x86and_d(flag_base, temp);
                     } else {
-                        la_x86and_w(reg_n, temp);
+                        la_x86and_w(flag_base, temp);
                     }
                     lata_logical_flags_set_carry();
                 }
@@ -7068,9 +7107,9 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
             case 3: /* ANDS */
                 if (opc == 3) {
                     if (sf) {
-                        la_x86and_d(reg_n, reg_m);
+                        la_x86and_d(flag_base, reg_m);
                     } else {
-                        la_x86and_w(reg_n, reg_m);
+                        la_x86and_w(flag_base, reg_m);
                     }
                     lata_logical_flags_set_carry();
                 }
@@ -7087,9 +7126,9 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
                 if (opc == 3) {
                     la_nor(temp, zero_ir2_opnd, reg_m);
                     if (sf) {
-                        la_x86and_d(reg_n, temp);
+                        la_x86and_d(flag_base, temp);
                     } else {
-                        la_x86and_w(reg_n, temp);
+                        la_x86and_w(flag_base, temp);
                     }
                     lata_logical_flags_set_carry();
                 }
@@ -7113,6 +7152,7 @@ static void disas_logic_reg(DisasContext* s, uint32_t insn)
     free_alloc_gpr(reg_n);
     free_alloc_gpr(reg_m);
     free_alloc_gpr(temp);
+    free_alloc_gpr(flag_base);
 }
 
 static void gen_add_sub_reg_result(bool setflags, bool sub_op, bool sf,
@@ -7324,9 +7364,9 @@ static void disas_data_proc_3src(DisasContext* s, uint32_t insn)
     // bool is_signed = false;
 
     IR2_OPND reg_d = alloc_gpr_dst(rd);
-    IR2_OPND reg_n = alloc_gpr_src(rn);
+    IR2_OPND reg_n = alloc_gpr_src_ro(rn);
     IR2_OPND reg_a, temp;
-    IR2_OPND reg_m = alloc_gpr_src(rm);
+    IR2_OPND reg_m = alloc_gpr_src_ro(rm);
 
     if (clearGprHigh && sf && arm_la_map[rn] >= 0 && rn != 31) {
         clear_gpr_high(rn);
@@ -7347,7 +7387,7 @@ static void disas_data_proc_3src(DisasContext* s, uint32_t insn)
                 /* Special-case MADD with rA == XZR; it is the standard MUL alias */
                 la_mulw_d_w(reg_d, reg_n, reg_m);
             } else {
-                reg_a = alloc_gpr_src(ra);
+                reg_a = alloc_gpr_src_ro(ra);
                 if (clearGprHigh && arm_la_map[ra] >= 0 && ra != 31) {
                     clear_gpr_high(ra);
                 }
@@ -7379,7 +7419,7 @@ static void disas_data_proc_3src(DisasContext* s, uint32_t insn)
                     la_mul_w(reg_d, reg_n, reg_m);
                 }
             } else {
-                reg_a = alloc_gpr_src(ra);
+                reg_a = alloc_gpr_src_ro(ra);
                 if (clearGprHigh && arm_la_map[ra] >= 0 && ra != 31) {
                     clear_gpr_high(ra);
                 }
@@ -7414,7 +7454,7 @@ static void disas_data_proc_3src(DisasContext* s, uint32_t insn)
                 /* Special-case MADD with rA == XZR; it is the standard MUL alias */
                 la_mulw_d_wu(reg_d, reg_n, reg_m);
             } else {
-                reg_a = alloc_gpr_src(ra);
+                reg_a = alloc_gpr_src_ro(ra);
                 if (clearGprHigh && arm_la_map[ra] >= 0 && ra != 31) {
                     clear_gpr_high(ra);
                 }
@@ -22484,8 +22524,10 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
 #ifdef CONFIG_LATA_INSTS_PATTERN
         /*Only check if the last two elements are CMP+B.COND*/
         if (i == ir1_nr - 2 && insts_pattern(pir1, pir1 + 1)) {
+#ifndef CONFIG_LATA_TU
             tcg_ctx->gen_insn_end_off[i] = (lsenv->tr_data->real_ir2_inst_num) << 2;
             tcg_ctx->gen_insn_data[i * TARGET_INSN_START_WORDS] = pir1->pc_curr;
+#endif
             lata_gpr_cache_end_insn();
             lata_df_advance_insn();
             last_is_jmp = DISAS_NORETURN;

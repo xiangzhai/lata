@@ -431,7 +431,7 @@ void lata_gpr_cache_end_insn(void)
 
         guest_reg = lsenv->tr_data->gpr_cache[i].guest_reg;
         if (!lata_df_reg_live_after(guest_reg)) {
-            lata_gpr_cache_invalidate_slot(i);
+            lata_gpr_cache_flush_slot(i);
             continue;
         }
         lsenv->tr_data->gpr_cache[i].pinned = false;
@@ -451,7 +451,7 @@ bool lata_gpr_cache_reclaim(void)
             lsenv->tr_data->gpr_cache[i].pinned) {
             continue;
         }
-        lata_gpr_cache_invalidate_slot(i);
+        lata_gpr_cache_flush_slot(i);
         reclaimed = true;
     }
 
@@ -479,6 +479,20 @@ bool lata_gpr_cache_adopt_clean(int i, IR2_OPND opnd)
     host_reg = ir2_opnd_base_reg_num(&opnd);
     if (host_reg == la_a0 || lata_gpr_cache_find_host(host_reg) >= 0) {
         return false;
+    }
+
+    /*
+     * Some translators free the destination temp before calling
+     * store_gpr_dst().  Never advertise an already-freed host register as
+     * cache-owned: ra_alloc_itemp() could hand it out again while the cache
+     * still holds a stale copy.
+     */
+    {
+        int virt_id = reg_itemp_reverse_map[host_reg];
+        if (virt_id < 0 ||
+            !(lsenv->tr_data->itemp_status & (1u << virt_id))) {
+            return false;
+        }
     }
 
     for (int slot = 0; slot < LATA_GPR_CACHE_MAX; slot++) {
@@ -1533,15 +1547,44 @@ static IR2_OPND alloc_gpr_src_cached(int i, bool sp)
     }
 }
 
-/* gpr同时为src和dst, 使用alloc_gpr_src,并且需要store回去 */
+/*
+ * Mutable source reads must not expose the shared cache register: callers
+ * are allowed to rewrite the returned operand (address masking, pre/post
+ * indexed writeback) without that being a guest register update.  Copy a
+ * cached value into a normal temp; on a miss fall back to the old direct
+ * env load.  Read-only users still use alloc_gpr_src_*_ro() and share the
+ * cache entry directly.
+ */
+static IR2_OPND alloc_gpr_src_copy(int i, bool sp)
+{
+    int index;
+
+    if (!sp && i == 31) {
+        return ir2_opnd_new(IR2_OPND_GPR, la_zero);
+    }
+    if (arm_la_map[i] >= 0) {
+        return ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]);
+    }
+
+    index = lata_gpr_cache_find(i);
+    if (index >= 0) {
+        IR2_OPND src = lata_gpr_cache_opnd(index);
+        IR2_OPND copy = ra_alloc_itemp();
+
+        la_mov64(copy, src);
+        return copy;
+    }
+    return alloc_gpr_src_uncached(i, sp);
+}
+
 IR2_OPND alloc_gpr_src(int i)
 {
-    return alloc_gpr_src_uncached(i, false);
+    return alloc_gpr_src_copy(i, false);
 }
 
 IR2_OPND alloc_gpr_src_sp(int i)
 {
-    return alloc_gpr_src_uncached(i, true);
+    return alloc_gpr_src_copy(i, true);
 }
 
 IR2_OPND alloc_gpr_src_ro(int i)
@@ -1565,7 +1608,12 @@ IR2_OPND alloc_gpr_dst(int i) {
     } else {
         index = lata_gpr_cache_find(i);
         if (index >= 0) {
-            lata_gpr_cache_invalidate_slot(index);
+            /*
+             * The guest register is about to be overwritten, but it may also
+             * be a source of this instruction (rd == rn/rm).  Release the
+             * stale copy before allocating the destination temp.
+             */
+            lata_gpr_cache_flush_slot(index);
         }
         return ra_alloc_itemp();
     }
@@ -1579,7 +1627,7 @@ IR2_OPND alloc_gpr_dst_sp(int i) {
     } else {
         index = lata_gpr_cache_find(i);
         if (index >= 0) {
-            lata_gpr_cache_invalidate_slot(index);
+            lata_gpr_cache_flush_slot(index);
         }
         return ra_alloc_itemp();
     }
@@ -1590,10 +1638,11 @@ void store_gpr_dst(int i, IR2_OPND opnd) {
     if (arm_la_map[i] < 0 && ir2_opnd_base_reg_num(&opnd) != 0) {
         int index = lata_gpr_cache_find(i);
         if (index >= 0) {
-            lata_gpr_cache_invalidate_slot(index);
+            lata_gpr_cache_flush_slot(index);
         }
         la_st_d(opnd, env_ir2_opnd, env_offset_gpr(i));
-    }   
+        lata_gpr_cache_adopt_clean(i, opnd);
+    }
 }
 
 /* la_zero写回 */
