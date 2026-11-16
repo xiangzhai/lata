@@ -55,12 +55,16 @@ typedef struct LataIR2OpClass {
  * must not be shared between threads.
  */
 static __thread LataIR2PeepholeStats peephole_stats;
-static __thread bool *protected_raw_branch_targets;
-static __thread int protected_raw_branch_targets_len;
+static __thread uint32_t *protected_raw_branch_gen;
+static __thread int protected_raw_branch_gen_len;
+static __thread uint32_t protected_raw_branch_gen_current;
 static __thread int *raw_branch_old_id_to_index;
 static __thread int *raw_branch_old_index_to_id;
+static __thread int *raw_branch_entry_target;
+static __thread int raw_branch_entry_count;
 static __thread int raw_branch_old_count;
 static __thread int raw_branch_scratch_cap;
+static __thread bool raw_branch_protection_ready;
 static __thread int *reloc_new_id_to_index;
 static __thread int reloc_new_id_to_index_cap;
 
@@ -89,6 +93,13 @@ static __thread uint32_t access_cache_current_gen;
                                LATA_OPB_SIDE_EFFECT | LATA_OPB_UNKNOWN)
 
 static uint8_t opcode_boundary_flags[LISA_ENDING + 1];
+/*
+ * Operand position holding the PC-relative target for every branch opcode,
+ * or -1 for instructions that are not PC-relative branches.  Branch tests run
+ * for every IR2 instruction during each peephole run, so answer them with a
+ * table lookup instead of a chain of opcode predicates.
+ */
+static int8_t pc_branch_operand_index[LISA_ENDING + 1];
 static gsize opcode_boundary_once;
 
 static void opcode_boundary_init(void);
@@ -165,21 +176,11 @@ static bool ir2_opcode_is_control(IR2_OPCODE opcode)
            opcode == LISA_JISCR0 || opcode == LISA_JISCR1;
 }
 
-static IR2_OPND *pc_relative_branch_opnd(IR2_INST *ir2)
+static inline IR2_OPND *pc_relative_branch_opnd(IR2_INST *ir2)
 {
-    IR2_OPCODE opcode = ir2_opcode(ir2);
+    int opnd = pc_branch_operand_index[(uint16_t)ir2->_opcode];
 
-    if (opcode == LISA_B || opcode == LISA_BL) {
-        return &ir2->_opnd[0];
-    }
-    if (ir2_opcode_is_branch_with_2opnds(opcode) ||
-        ir2_opcode_is_f_branch(opcode)) {
-        return &ir2->_opnd[1];
-    }
-    if (ir2_opcode_is_branch_with_3opnds(opcode)) {
-        return &ir2->_opnd[2];
-    }
-    return NULL;
+    return opnd < 0 ? NULL : &ir2->_opnd[opnd];
 }
 
 static bool ir2_opcode_is_barrier(IR2_OPCODE opcode)
@@ -354,6 +355,17 @@ static void opcode_boundary_init(void)
         IR2_OPCODE opcode = (IR2_OPCODE)i;
         bool is_load = la_ir2_opcode_is_load(opcode);
         bool is_store = la_ir2_opcode_is_store(opcode);
+        int branch_opnd = -1;
+
+        if (opcode == LISA_B || opcode == LISA_BL) {
+            branch_opnd = 0;
+        } else if (ir2_opcode_is_branch_with_2opnds(opcode) ||
+                   ir2_opcode_is_f_branch(opcode)) {
+            branch_opnd = 1;
+        } else if (ir2_opcode_is_branch_with_3opnds(opcode)) {
+            branch_opnd = 2;
+        }
+        pc_branch_operand_index[i] = branch_opnd;
         bool memory = is_load || is_store ||
                       (opcode >= LISA_LDX_B && opcode <= LISA_XVSTX) ||
                       (opcode >= LISA_AMSWAP_W && opcode <= LISA_AMMIN_DB_DU) ||
@@ -593,57 +605,97 @@ static int build_assembled_index_map(int *id_to_index, int *index_to_id,
 static void ensure_raw_branch_scratch(int max_id)
 {
     if (raw_branch_scratch_cap < max_id) {
-        protected_raw_branch_targets =
-            g_renew(bool, protected_raw_branch_targets, max_id);
+        int old_cap = raw_branch_scratch_cap;
+
+        protected_raw_branch_gen =
+            g_renew(uint32_t, protected_raw_branch_gen, max_id);
         raw_branch_old_id_to_index =
             g_renew(int, raw_branch_old_id_to_index, max_id);
         raw_branch_old_index_to_id =
             g_renew(int, raw_branch_old_index_to_id, max_id);
+        raw_branch_entry_target = g_renew(int, raw_branch_entry_target, max_id);
+        memset(protected_raw_branch_gen + old_cap, 0,
+               sizeof(*protected_raw_branch_gen) * (max_id - old_cap));
         raw_branch_scratch_cap = max_id;
     }
 }
 
-static void protect_raw_branch_targets(void)
+static void ensure_raw_branch_protection(void)
 {
     TRANSLATION_DATA *t = lsenv->tr_data;
     int max_id = t->ir2_inst_num_current;
+    int index = 0;
+
+    if (raw_branch_protection_ready) {
+        return;
+    }
+    raw_branch_protection_ready = true;
 
     ensure_raw_branch_scratch(max_id);
-    memset(protected_raw_branch_targets, 0, sizeof(*protected_raw_branch_targets) * max_id);
-    protected_raw_branch_targets_len = max_id;
-    for (int i = 0; i < max_id; i++) {
-        raw_branch_old_id_to_index[i] = -1;
-        raw_branch_old_index_to_id[i] = -1;
+    protected_raw_branch_gen_len = max_id;
+    if (++protected_raw_branch_gen_current == 0) {
+        if (protected_raw_branch_gen_len) {
+            memset(protected_raw_branch_gen, 0,
+                   sizeof(*protected_raw_branch_gen) *
+                   protected_raw_branch_gen_len);
+        }
+        protected_raw_branch_gen_current = 1;
     }
+    raw_branch_entry_count = 0;
 
-    raw_branch_old_count = build_assembled_index_map(raw_branch_old_id_to_index,
-                                                     raw_branch_old_index_to_id,
-                                                     max_id);
+    /*
+     * Build the assembled-index map and record every raw (immediate-offset)
+     * branch in one walk.  Earlier versions walked the whole IR2 list a second
+     * time just to classify branches, and cleared the scratch arrays to -1
+     * across the whole id range on every TB.  Neither is needed: every branch
+     * instruction is still live here, and every id read during relocation is
+     * either a live instruction or a protected (never removed) branch target.
+     */
     for (IR2_INST *it = t->first_ir2; it; it = peephole_next(it)) {
-        IR2_OPND *opnd = pc_relative_branch_opnd(it);
         int id = ir2_get_id(it);
+        IR2_OPND *opnd;
 
-        if (!opnd || !ir2_opnd_is_imm(opnd) || id < 0 || id >= max_id ||
-            raw_branch_old_id_to_index[id] < 0) {
+        if (id < 0 || id >= max_id || ir2_is_meta(it)) {
             continue;
         }
 
-        int target_index = raw_branch_old_id_to_index[id] + ir2_opnd_imm(opnd);
-        if (target_index >= 0 && target_index < raw_branch_old_count &&
-            raw_branch_old_index_to_id[target_index] >= 0) {
-            protected_raw_branch_targets[
-                raw_branch_old_index_to_id[target_index]] = true;
+        raw_branch_old_id_to_index[id] = index;
+        raw_branch_old_index_to_id[index] = id;
+
+        opnd = pc_relative_branch_opnd(it);
+        if (opnd && ir2_opnd_is_imm(opnd)) {
+            raw_branch_entry_target[raw_branch_entry_count] =
+                index + ir2_opnd_imm(opnd);
+            raw_branch_entry_count++;
+        }
+        index++;
+    }
+    raw_branch_old_count = index;
+
+    for (int i = 0; i < raw_branch_entry_count; i++) {
+        int target_index = raw_branch_entry_target[i];
+
+        if (target_index >= 0 && target_index < raw_branch_old_count) {
+            int target_id = raw_branch_old_index_to_id[target_index];
+
+            if (target_id >= 0 && target_id < max_id) {
+                protected_raw_branch_gen[target_id] =
+                    protected_raw_branch_gen_current;
+            }
         }
     }
 }
 
-static bool ir2_is_protected_raw_branch_target(IR2_INST *ir2)
+static inline bool ir2_is_protected_raw_branch_target(IR2_INST *ir2)
 {
-    int id = ir2_get_id(ir2);
+    int id;
 
-    return id >= 0 && id < protected_raw_branch_targets_len &&
-           protected_raw_branch_targets &&
-           protected_raw_branch_targets[id];
+    ensure_raw_branch_protection();
+    id = ir2_get_id(ir2);
+
+    return id >= 0 && id < protected_raw_branch_gen_len &&
+           protected_raw_branch_gen &&
+           protected_raw_branch_gen[id] == protected_raw_branch_gen_current;
 }
 
 static void relocate_raw_branches(void)
@@ -658,10 +710,8 @@ static void relocate_raw_branches(void)
         reloc_new_id_to_index_cap = max_id;
     }
     new_id_to_index = reloc_new_id_to_index;
-    for (int i = 0; i < max_id; i++) {
-        new_id_to_index[i] = -1;
-    }
 
+    /* Every live id and every protected branch target is filled in here. */
     build_assembled_index_map(new_id_to_index, NULL, max_id);
 
     for (IR2_INST *it = t->first_ir2; it; it = peephole_next(it)) {
@@ -697,8 +747,10 @@ static void clear_raw_branch_protection(void)
      * The scratch arrays are reused across translation blocks; only the
      * lengths need to be reset so the next run starts from a clean state.
      */
-    protected_raw_branch_targets_len = 0;
+    protected_raw_branch_gen_len = 0;
+    raw_branch_entry_count = 0;
     raw_branch_old_count = 0;
+    raw_branch_protection_ready = false;
 }
 
 static void stats_record(LataPeepholeAction action)
@@ -784,6 +836,14 @@ static bool is_self_addi_d(IR2_INST *ir2)
 static LataPeepholePassResult fold_window_candidate(IR2_INST *ir2,
                                                     IR2_INST *candidate)
 {
+    if (!same_high_clear(ir2, candidate) &&
+        !same_addr_wrap(ir2, candidate) &&
+        !(is_self_addi_d(ir2) && is_self_addi_d(candidate))) {
+        return LATA_PASS_NO_CHANGE;
+    }
+    if (ir2_is_protected_raw_branch_target(candidate)) {
+        return LATA_PASS_NO_CHANGE;
+    }
     if (same_high_clear(ir2, candidate)) {
         remove_ir2(candidate, LATA_PH_REMOVE_HIGH_CLEAR);
         stats_record(LATA_PH_WINDOW_FOLD);
@@ -843,8 +903,7 @@ static LataPeepholePassResult pass_small_window(IR2_INST *ir2)
         const LataIR2RegAccess *access;
         LataPeepholePassResult result;
 
-        if (ir2_is_protected_raw_branch_target(it) ||
-            ir2_is_window_boundary(it)) {
+        if (ir2_is_window_boundary(it)) {
             return LATA_PASS_NO_CHANGE;
         }
 
@@ -999,9 +1058,6 @@ static LataPeepholePassResult pass_combine_addi(IR2_INST *ir2)
         ir2_is_window_boundary(ir2) || ir2_is_window_boundary(next)) {
         return LATA_PASS_NO_CHANGE;
     }
-    if (ir2_is_protected_raw_branch_target(next)) {
-        return LATA_PASS_NO_CHANGE;
-    }
     if (!ir2_is_same_ireg(&ir2->_opnd[0], &ir2->_opnd[1]) ||
         !ir2_is_same_ireg(&next->_opnd[0], &next->_opnd[1]) ||
         !ir2_opnd_cmp(&ir2->_opnd[0], &next->_opnd[0])) {
@@ -1010,7 +1066,7 @@ static LataPeepholePassResult pass_combine_addi(IR2_INST *ir2)
 
     int64_t imm = (int64_t)ir2_opnd_imm(&ir2->_opnd[2]) +
                   ir2_opnd_imm(&next->_opnd[2]);
-    if (!si12_fits(imm)) {
+    if (!si12_fits(imm) || ir2_is_protected_raw_branch_target(next)) {
         return LATA_PASS_NO_CHANGE;
     }
 
@@ -1072,7 +1128,6 @@ void lata_ir2_peephole_run(void)
     peephole_stats.runs++;
 
     access_cache_begin(lsenv->tr_data->ir2_inst_num_current);
-    protect_raw_branch_targets();
 
     ir2 = lsenv->tr_data->first_ir2;
     while (ir2) {

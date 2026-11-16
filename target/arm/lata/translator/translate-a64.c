@@ -6177,7 +6177,7 @@ static bool trans_ADD_i(DisasContext* s)
     arg_ADD_i* a = &(s->arg.f_rri_sf);
     IR2_OPND reg_d = alloc_gpr_dst_sp(a->rd);
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
-    IR2_OPND temp = ra_alloc_itemp();
+    IR2_OPND temp = ir2_opnd_new_none();
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
         clear_gpr_high(a->rn);
@@ -6193,6 +6193,7 @@ static bool trans_ADD_i(DisasContext* s)
                     la_addi_w(reg_d, reg_n, a->imm);
                 }
             } else {
+                temp = ra_alloc_itemp();
                 la_ori(temp, zero_ir2_opnd, a->imm);
                 if (a->sf) {
                     la_add_d(reg_d, reg_n, temp);
@@ -6202,6 +6203,7 @@ static bool trans_ADD_i(DisasContext* s)
             }
             break;
         case 1:
+            temp = ra_alloc_itemp();
             la_lu12i_w(temp, a->imm >> 12);
             if (a->sf) {
                 la_add_d(reg_d, reg_n, temp);
@@ -6227,7 +6229,7 @@ static bool trans_SUB_i(DisasContext* s)
     arg_SUB_i* a = &(s->arg.f_rri_sf);
     IR2_OPND reg_d = alloc_gpr_dst_sp(a->rd);
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
-    IR2_OPND temp = ra_alloc_itemp();
+    IR2_OPND temp = ir2_opnd_new_none();
 
     if (clearGprHigh && a->sf && arm_la_map[a->rn] >= 0 && a->rn != 31) {
         clear_gpr_high(a->rn);
@@ -6243,6 +6245,7 @@ static bool trans_SUB_i(DisasContext* s)
                     la_addi_w(reg_d, reg_n, -a->imm);
                 }
             } else {
+                temp = ra_alloc_itemp();
                 la_ori(temp, zero_ir2_opnd, a->imm);
                 if (a->sf) {
                     la_sub_d(reg_d, reg_n, temp);
@@ -6252,6 +6255,7 @@ static bool trans_SUB_i(DisasContext* s)
             }
             break;
         case 1:
+            temp = ra_alloc_itemp();
             la_lu12i_w(temp, a->imm >> 12);
             if (a->sf) {
                 la_sub_d(reg_d, reg_n, temp);

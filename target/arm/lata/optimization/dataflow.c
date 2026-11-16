@@ -1114,6 +1114,47 @@ static const LataGPRRule gpr_rules[] = {
     { AARCH64_A64_NULL, NULL },
 };
 
+/*
+ * The rule tables are indexed at translation time to avoid scanning every
+ * rule for every guest instruction.  gpr rules are keyed by the decoded
+ * instruction type; NZCV rules are keyed by the instruction's top byte, with
+ * a bit per rule that can possibly match that byte.
+ */
+static LataGPRFactFn gpr_fact_by_type[AARCH64_A64_UNALLOCATED + 1];
+static bool gpr_handled_by_type[AARCH64_A64_UNALLOCATED + 1];
+static uint16_t nzcv_rule_mask_by_top[256];
+static bool df_rule_tables_ready;
+
+static void init_df_rule_tables(void)
+{
+    if (df_rule_tables_ready) {
+        return;
+    }
+
+    for (size_t i = 0; i < ARRAY_SIZE(gpr_rules); i++) {
+        const LataGPRRule *rule = &gpr_rules[i];
+
+        if (!rule->fn || (unsigned)rule->type > AARCH64_A64_UNALLOCATED) {
+            continue;
+        }
+        gpr_fact_by_type[rule->type] = rule->fn;
+        gpr_handled_by_type[rule->type] = true;
+    }
+
+    for (int r = 0; nzcv_rules[r].mask; r++) {
+        uint32_t top_mask = (nzcv_rules[r].mask >> 24) & 0xff;
+        uint32_t top_pat = (nzcv_rules[r].pattern >> 24) & 0xff;
+
+        for (int b = 0; b < 256; b++) {
+            if ((b & top_mask) == top_pat) {
+                nzcv_rule_mask_by_top[b] |= 1u << r;
+            }
+        }
+    }
+
+    df_rule_tables_ready = true;
+}
+
 static uint8_t nzcv_mask_from_rmif(uint32_t insn)
 {
     return extract32(insn, 0, 4) & LATA_NZCV_ALL;
@@ -1151,8 +1192,13 @@ static bool sysreg_is_nzcv(DisasContext *ir1)
 static void analyze_nzcv_fact(LataIR1Facts *fact, DisasContext *ir1)
 {
     uint32_t insn = ir1->insn;
+    uint16_t rule_mask = nzcv_rule_mask_by_top[insn >> 24];
 
-    for (const LataNZCVRule *rule = nzcv_rules; rule->mask; rule++) {
+    while (rule_mask) {
+        int r = __builtin_ctz(rule_mask);
+        const LataNZCVRule *rule = &nzcv_rules[r];
+
+        rule_mask &= rule_mask - 1;
         if ((insn & rule->mask) == rule->pattern) {
             fact->nzcv_use |= rule->use;
             fact->nzcv_def |= rule->def;
@@ -1191,12 +1237,14 @@ static void analyze_gpr_common(LataIR1Facts *fact, DisasContext *ir1)
     bool exclusive_state;
     bool table_handled = false;
 
-    for (const LataGPRRule *rule = gpr_rules; rule->fn; rule++) {
-        if (rule->type == ir1->insn_type) {
-            rule->fn(fact, ir1);
-            table_handled = true;
-            break;
+    if ((unsigned)ir1->insn_type <= AARCH64_A64_UNALLOCATED &&
+        gpr_handled_by_type[ir1->insn_type]) {
+        LataGPRFactFn fn = gpr_fact_by_type[ir1->insn_type];
+
+        if (fn) {
+            fn(fact, ir1);
         }
+        table_handled = true;
     }
 
     switch (ir1->insn_type) {
@@ -1770,12 +1818,24 @@ void lata_df_analyze_tb(TranslationBlock *tb)
     }
 
     LataIR1DF *df = lata_df_alloc_ir1(tb);
-    memset(df, 0, sizeof(*df) * tb->icount);
+
+    init_df_rule_tables();
+
+    /* Every field of each entry is written below (fact by analyze_ir1,
+     * per-instruction live sets by store_summary), so clearing the whole
+     * array first only wastes memory bandwidth. */
     for (uint32_t i = 0; i < tb->icount; i++) {
         lata_df_analyze_ir1(&df[i].fact, &ir1[i]);
     }
     lata_df_store_summary(tb, df);
+#ifndef CONFIG_LATA_TU
+    /*
+     * In TU mode the per-instruction live sets are recomputed from the final
+     * cross-TB live-out after the fixed point below, so doing it here only
+     * walks every instruction in every TB twice.
+     */
     lata_df_refresh_ir1_live_after(tb);
+#endif
 }
 
 #ifdef CONFIG_LATA_TU

@@ -185,6 +185,46 @@ static void pattern_type(dt_aarch64_insn b_type, IR2_OPND *temp_n, IR2_OPND *tem
     }
 }
 
+static bool bcond_is_signed(dt_aarch64_insn b_type)
+{
+    switch (b_type)
+    {
+    case B_GE:
+    case B_LT:
+    case B_GT:
+    case B_LE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+/*
+ * A 32-bit compare only looks at the low word of its operands.  Signed
+ * conditions need the two's-complement value, so sign-extend the low word;
+ * equality and unsigned conditions compare the zero-extended value.
+ */
+static void extend_w_operand(IR2_OPND dst, IR2_OPND src, bool sign)
+{
+    if (sign) {
+        la_add_w(dst, src, zero_ir2_opnd);
+    } else {
+        la_bstrpick_w(dst, src, 31, 0);
+    }
+}
+
+/* Comparisons against zero map to the single-register branches on LA64. */
+static void emit_zero_branch(dt_aarch64_insn b_type, IR2_OPND reg,
+                             IR2_OPND label)
+{
+    if (b_type == B_EQ) {
+        la_beqz(reg, label);
+    } else {
+        assert(b_type == B_NE);
+        la_bnez(reg, label);
+    }
+}
+
 static void trans_CMPI_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_type, int offset)
 {
     int imm = extract32(insn, 10, 12);
@@ -200,28 +240,46 @@ static void trans_CMPI_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
         clear_gpr_high(rn);
     }
 
-    switch (shift)
-    {
-    case 0:
-        la_ori(temp, zero_ir2_opnd, imm);
-        break;
-    case 1:
-        la_lu12i_w(temp, imm);
-        break;
-    default:
-        assert(0);
-        break;
-    }
+    /* A compare-and-branch against zero needs neither an immediate nor a
+     * two-register compare: EQ/NE map straight to beqz/bnez. */
+    bool zero_branch = imm == 0 && (b_type == B_EQ || b_type == B_NE);
+    IR2_OPND nzcv_op2 = temp;
 
-    if (sf)
-    {
-        pattern_type(b_type, &reg_n, &temp, &label);
-    }
-    else
-    {
-        la_bstrpick_w(temp_n, reg_n, 31, 0);
-        la_bstrpick_w(temp, temp, 31, 0);
-        pattern_type(b_type, &temp_n, &temp, &label);
+    if (zero_branch) {
+        IR2_OPND cmp_reg = reg_n;
+
+        if (!sf) {
+            extend_w_operand(temp_n, reg_n, false);
+            cmp_reg = temp_n;
+        }
+        emit_zero_branch(b_type, cmp_reg, label);
+        nzcv_op2 = zero_ir2_opnd;
+    } else {
+        switch (shift)
+        {
+        case 0:
+            la_ori(temp, zero_ir2_opnd, imm);
+            break;
+        case 1:
+            la_lu12i_w(temp, imm);
+            break;
+        default:
+            assert(0);
+            break;
+        }
+
+        if (sf)
+        {
+            pattern_type(b_type, &reg_n, &temp, &label);
+        }
+        else
+        {
+            bool sign = bcond_is_signed(b_type);
+
+            extend_w_operand(temp_n, reg_n, sign);
+            extend_w_operand(temp, temp, sign);
+            pattern_type(b_type, &temp_n, &temp, &label);
+        }
     }
 
     if (clearGprHigh) {
@@ -233,10 +291,10 @@ static void trans_CMPI_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
     }
     lata_vec_materialize_all_dirty();
 
-    nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 0);
+    nzcv_calculate_if_live(s, temp_n, nzcv_op2, reg_n, sf, 0);
     pattern_goto_tb(s, 0, 4);
     la_label(label);
-    nzcv_calculate_if_live(s, temp_n, temp, reg_n, sf, 1);
+    nzcv_calculate_if_live(s, temp_n, nzcv_op2, reg_n, sf, 1);
     pattern_goto_tb(s, 1, offset);
 
     free_alloc_gpr(reg_n);
@@ -320,8 +378,10 @@ static void trans_CMPE_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
     }
     else
     {
-        la_bstrpick_w(temp_n, reg_n, 31, 0);
-        la_bstrpick_w(temp, temp, 31, 0);
+        bool sign = bcond_is_signed(b_type);
+
+        extend_w_operand(temp_n, reg_n, sign);
+        extend_w_operand(temp, temp, sign);
         pattern_type(b_type, &temp_n, &temp, &label);
     }
 
@@ -414,8 +474,10 @@ static void trans_CMPS_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
         }
         else
         {
-            la_bstrpick_w(temp_n, reg_n, 31, 0);
-            la_bstrpick_w(temp, temp, 31, 0);
+            bool sign = bcond_is_signed(b_type);
+
+            extend_w_operand(temp_n, reg_n, sign);
+            extend_w_operand(temp, temp, sign);
             pattern_type(b_type, &temp_n, &temp, &label);
         }
         if (clearGprHigh) {
@@ -439,8 +501,10 @@ static void trans_CMPS_BCOND(DisasContext *s, uint32_t insn, dt_aarch64_insn b_t
         }
         else
         {
-            la_bstrpick_w(temp_n, reg_n, 31, 0);
-            la_bstrpick_w(temp, reg_m, 31, 0);
+            bool sign = bcond_is_signed(b_type);
+
+            extend_w_operand(temp_n, reg_n, sign);
+            extend_w_operand(temp, reg_m, sign);
             pattern_type(b_type, &temp_n, &temp, &label);
         }
         if (clearGprHigh) {
@@ -485,15 +549,21 @@ bool insts_pattern(DisasContext *s, DisasContext *s2)
     uint32_t insn = s->insn;
     dt_aarch64_insn cmp_type = lookup_pattern(&cmp_table[0], insn);
     dt_aarch64_insn b_type = lookup_pattern(&bcond_table[0], insn2);
-    
+
+    /*
+     * The 32-bit fused path reconstructs NZCV for each live edge.  Keep the
+     * normal compare/branch sequence when the architectural flags are live:
+     * the regular path shares the same TU edge machinery as every other
+     * flags-producing instruction.
+     */
+    if (b_type && cmp_type && !(insn & (1u << 31)) &&
+        (lata_df_should_save_nzcv_for_edge(s->base->tb, 0) ||
+         lata_df_should_save_nzcv_for_edge(s->base->tb, 1))) {
+        return false;
+    }
+
     if (b_type && cmp_type)
     {
-        /* The fused compare uses full-width host comparisons on the operands.
-         * For 32-bit compares this does not always match the architectural
-         * 32-bit semantics, so leave those to the normal path. */
-        if (!(insn & (1u << 31))) {
-            return false;
-        }
         int offset = sextract32(insn2, 5, 19) << 2;
         // s->base->tb->nzcv_use = false;
         switch (cmp_type)

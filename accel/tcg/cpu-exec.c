@@ -1142,7 +1142,13 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 tb_add_jump(last_tb, tb_exit, tb);
             }
 #ifdef CONFIG_LATA_INDIRECT_JMP
-            if (tb_lookup_hit && (tb_cflags(tb) & CF_PARALLEL)) {
+            /*
+             * Refresh the FAM slot on a cache hit from the slow lookup path.
+             * A direct-mapped LATA FAM entry can be overwritten by another
+             * guest PC that hashes to the same slot; without re-adding the
+             * target here, that PC would miss the fast path forever.
+             */
+            if (tb_lookup_hit) {
                 lata_fam_add_tb(cpu->env_ptr, tb);
             }
 #endif

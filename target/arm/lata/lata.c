@@ -177,6 +177,8 @@ static __thread TRANSLATION_DATA tr_data_real;
 __thread TRANSLATION_DATA *tr_data;
 static __thread uint8_t lata_vec_dirty_size[32];
 static __thread uint32_t lata_vec_dirty_mask;
+/* Bitmask of host GPRs currently owned by the guest GPR cache. */
+static __thread uint32_t lata_gpr_cache_host_mask;
 
 bool lata_dump = 0;
 uint64_t context_switch_bt_to_native;
@@ -200,7 +202,8 @@ static int lata_gpr_cache_find(int guest_reg)
 
 static int lata_gpr_cache_find_host(int host_reg)
 {
-    if (!lsenv || !lsenv->tr_data) {
+    if (!lsenv || !lsenv->tr_data ||
+        !(lata_gpr_cache_host_mask & (1u << host_reg))) {
         return -1;
     }
 
@@ -229,6 +232,7 @@ static void lata_gpr_cache_invalidate_slot(int index)
     }
 
     opnd = lata_gpr_cache_opnd(index);
+    lata_gpr_cache_host_mask &= ~(1u << ir2_opnd_base_reg_num(&opnd));
     memset(&lsenv->tr_data->gpr_cache[index], 0,
            sizeof(lsenv->tr_data->gpr_cache[index]));
     free_alloc_gpr(opnd);
@@ -265,6 +269,8 @@ static int lata_gpr_cache_alloc_slot(int guest_reg, bool load_old)
             lsenv->tr_data->gpr_cache[i].host_reg =
                 ir2_opnd_base_reg_num(&opnd);
             lsenv->tr_data->gpr_cache[i].valid = true;
+            lata_gpr_cache_host_mask |=
+                1u << lsenv->tr_data->gpr_cache[i].host_reg;
             if (load_old) {
                 la_ld_d(opnd, env_ir2_opnd, env_offset_gpr(guest_reg));
             }
@@ -395,6 +401,7 @@ void lata_gpr_cache_reset(void)
         return;
     }
     memset(lsenv->tr_data->gpr_cache, 0, sizeof(lsenv->tr_data->gpr_cache));
+    lata_gpr_cache_host_mask = 0;
 }
 
 void lata_gpr_cache_flush_all(void)
@@ -455,7 +462,8 @@ bool lata_gpr_cache_owns_opnd(IR2_OPND opnd)
     if (!ir2_opnd_is_ireg(&opnd)) {
         return false;
     }
-    return lata_gpr_cache_find_host(ir2_opnd_base_reg_num(&opnd)) >= 0;
+    return lata_gpr_cache_host_mask &
+           (1u << ir2_opnd_base_reg_num(&opnd));
 }
 
 bool lata_gpr_cache_adopt_clean(int i, IR2_OPND opnd)
@@ -477,6 +485,7 @@ bool lata_gpr_cache_adopt_clean(int i, IR2_OPND opnd)
             lsenv->tr_data->gpr_cache[slot].guest_reg = i;
             lsenv->tr_data->gpr_cache[slot].host_reg = host_reg;
             lsenv->tr_data->gpr_cache[slot].valid = true;
+            lata_gpr_cache_host_mask |= 1u << host_reg;
             return true;
         }
     }
@@ -658,129 +667,131 @@ int lata_gen_epilogue(TCGContext *tcg_ctx)
     return ins_nr;
 }
 
-static void resolve_branch_label(IR2_INST *ir2, int ir2_num,
-                                 int *label_num_to_ir2_num)
+static int8_t lata_branch_opnd_index[LISA_ENDING + 1];
+static bool lata_branch_opnd_table_ready;
+
+static void init_branch_opnd_table(void)
 {
-    IR2_OPCODE opcode = ir2->_opcode;
-    IR2_OPND *label_opnd = NULL;
+    for (int i = 0; i <= LISA_ENDING; i++) {
+        IR2_OPCODE opcode = (IR2_OPCODE)i;
+        int opnd = -1;
 
-    if (!ir2_opcode_is_branch(opcode) && !ir2_opcode_is_f_branch(opcode)) {
-        return;
+        if (opcode == LISA_B || opcode == LISA_BL) {
+            opnd = 0;
+        } else if (ir2_opcode_is_branch_with_3opnds(opcode)) {
+            opnd = 2;
+        } else if (ir2_opcode_is_f_branch(opcode) ||
+                   ir2_opcode_is_branch_with_2opnds(opcode)) {
+            opnd = 1;
+        }
+        lata_branch_opnd_index[i] = opnd;
     }
-    if (opcode == LISA_B || opcode == LISA_BL) {
-        label_opnd = &ir2->_opnd[0];
-    } else if (ir2_opcode_is_branch_with_3opnds(opcode)) {
-        label_opnd = &ir2->_opnd[2];
-    } else if (ir2_opcode_is_f_branch(opcode) ||
-               ir2_opcode_is_branch_with_2opnds(opcode)) {
-        label_opnd = &ir2->_opnd[1];
-    }
-    if (label_opnd && ir2_opnd_is_label(label_opnd)) {
-        int label_num = label_opnd->_label_id;
-        int target_ir2_num;
+    lata_branch_opnd_table_ready = true;
+}
 
-        lsassert(label_num > 0 && label_num <= lsenv->tr_data->label_num);
-        target_ir2_num = label_num_to_ir2_num[label_num];
-        lsassertm(target_ir2_num != -1, "label %d is not inserted\n",
-                  label_num);
-        ir2_opnd_convert_label_to_imm(label_opnd, target_ir2_num - ir2_num);
+static inline IR2_OPND *branch_label_opnd(IR2_INST *ir2)
+{
+    int opnd;
+
+    if (unlikely(!lata_branch_opnd_table_ready)) {
+        init_branch_opnd_table();
+    }
+    opnd = lata_branch_opnd_index[(uint16_t)ir2->_opcode];
+    return opnd < 0 ? NULL : &ir2->_opnd[opnd];
+}
+
+/*
+ * Forward branches are queued while assembling and patched afterwards, once
+ * every label position is known.  This keeps label resolution in the single
+ * pass that already writes the instruction stream instead of walking the IR2
+ * list once more just to record label positions.
+ */
+typedef struct LataPendingBranch {
+    IR2_INST *ir2;
+    int code_nr;
+} LataPendingBranch;
+
+static __thread LataPendingBranch *pending_branches;
+static __thread int pending_branches_cap;
+
+static void ensure_pending_branch_capacity(int count)
+{
+    if (pending_branches_cap < count) {
+        pending_branches = g_renew(LataPendingBranch, pending_branches, count);
+        pending_branches_cap = count;
     }
 }
 
-void label_dispose(int *label_num_to_ir2_num)
+static void label_finalize(int *label_num_to_ir2_num)
 {
-    /* 1. record the positions of label */
-    int ir2_num = 0;
-    IR2_INST *ir2_current = lsenv->tr_data->first_ir2;
-    while (ir2_current != NULL) {
-        if (ir2_current->_opcode == LISA_LABEL) {
-            int label_num = ir2_opnd_label_id(&ir2_current->_opnd[0]);
-            lsassertm(label_num_to_ir2_num[label_num] == -1,
-                      "label %d is in multiple positions\n", label_num);
-            label_num_to_ir2_num[label_num] = ir2_num;
-        } else if (ir2_current->_opcode == LISA_X86_INST) {
-            /* will not be assembled */
-        } else {
-            ir2_num++;
+    /* Resolve the offset of successor linkage code.
+     *
+     * @jmp_target_arg records the jmp instruction position.
+     * @jmp_reset_offset records the successor instruction of jmp (excluding
+     * the delay slot).  When the TB is removed from the buffer, the jmp
+     * instruction uses this position to revert the original "fall through".
+     */
+    TranslationBlock *tb = lsenv->tr_data->curr_tb;
+
+    /* prologue/epilogue has no tb */
+    if (tb) {
+        /* ctx->jmp_insn_offset point to tb->jmp_target_arg */
+        int label_id_0 = tb->jmp_reset_offset[0];
+        if (label_id_0 != TB_JMP_OFFSET_INVALID) {
+            tb->jmp_insn_offset[0] = (label_num_to_ir2_num[label_id_0] << 2);
+            tb->jmp_reset_offset[0] =
+                (label_num_to_ir2_num[label_id_0] << 2) + B_STUB_SIZE;
         }
-        ir2_current = ir2_next(ir2_current);
-    }
 
-    /* 2. resolve the offset of successor linkage code */
-    /* @jmp_target_arg recoed the jmp  inst position */
-    /* @jmp_reset_offset record the successor inst of jmp(exclude delay slot).
-     */
-    /*                   when the tb is removed from buffer. the jmp inst use
-     */
-    /*                   this position to revert the original "fall through".
-     */
-    {
-        TranslationBlock *tb = lsenv->tr_data->curr_tb;
-
-        /* prologue/epilogue has no tb */
-        if (tb) {
-            /* ctx->jmp_insn_offset point to tb->jmp_target_arg */
-            int label_id_0 = tb->jmp_reset_offset[0];
-            if (label_id_0 != TB_JMP_OFFSET_INVALID) {
-                tb->jmp_insn_offset[0] =
-                    (label_num_to_ir2_num[label_id_0] << 2);
-                tb->jmp_reset_offset[0] =
-                    (label_num_to_ir2_num[label_id_0] << 2) + B_STUB_SIZE;
-                // tb->jmp_target_addr[0] = (label_num_to_ir2_num[label_id_0] << 2);
-            }
-
-            int label_id_1 = tb->jmp_reset_offset[1];
-            if (label_id_1 != TB_JMP_OFFSET_INVALID) {
-                tb->jmp_insn_offset[1] =
-                    (label_num_to_ir2_num[label_id_1] << 2);
-                tb->jmp_reset_offset[1] =
-                    (label_num_to_ir2_num[label_id_1] << 2) + B_STUB_SIZE;
-                // tb->jmp_target_addr[1] = (label_num_to_ir2_num[label_id_1] << 2);
-            }
+        int label_id_1 = tb->jmp_reset_offset[1];
+        if (label_id_1 != TB_JMP_OFFSET_INVALID) {
+            tb->jmp_insn_offset[1] = (label_num_to_ir2_num[label_id_1] << 2);
+            tb->jmp_reset_offset[1] =
+                (label_num_to_ir2_num[label_id_1] << 2) + B_STUB_SIZE;
+        }
 
 #ifdef CONFIG_LATA_INSTS_PATTERN
-            label_id_0 = tb->nzcv_save[0];
-            if (label_id_0 != TB_JMP_OFFSET_INVALID) {
-                tb->nzcv_save[0] = (label_num_to_ir2_num[label_id_0] << 2);
-            }
+        label_id_0 = tb->nzcv_save[0];
+        if (label_id_0 != TB_JMP_OFFSET_INVALID) {
+            tb->nzcv_save[0] = (label_num_to_ir2_num[label_id_0] << 2);
+        }
 
-            label_id_1 = tb->nzcv_save[1];
-            if (label_id_1 != TB_JMP_OFFSET_INVALID) {
-                tb->nzcv_save[1] = (label_num_to_ir2_num[label_id_1] << 2);
-            }
+        label_id_1 = tb->nzcv_save[1];
+        if (label_id_1 != TB_JMP_OFFSET_INVALID) {
+            tb->nzcv_save[1] = (label_num_to_ir2_num[label_id_1] << 2);
+        }
 #endif
 #ifdef CONFIG_LATA_TU
-            if (tu_use_jmp(tb)) {
-                for (int i = 0; i < 2; i++) {
-                    LataTUEdge *edge = &tb->tu_edges[i];
-                    int label_id = edge->branch_offset;
-                    if (label_id != LATA_TU_EDGE_OFFSET_INVALID) {
-                        lsassert(label_id > 0 && label_id <= lsenv->tr_data->label_num);
-                        lsassertm(label_num_to_ir2_num[label_id] != -1,
-                                  "TU jump label %d is not inserted\n",
-                                  label_id);
-                        edge->branch_offset =
-                            (label_num_to_ir2_num[label_id] << 2);
-                    }
-                }
-
-                for (int i = 0; i < 2; i++) {
-                    LataTUEdge *edge = &tb->tu_edges[i];
-                    if (edge->unlink_stub_offset != TU_UNLINK_STUB_INVALID) {
-                        int label_id = edge->unlink_stub_offset;
-                        lsassert(label_id > 0 && label_id <= lsenv->tr_data->label_num);
-                        lsassertm(label_num_to_ir2_num[label_id] != -1,
-                                  "TU unlink label %d is not inserted\n",
-                                  label_id);
-                        edge->unlink_stub_offset =
-                            (label_num_to_ir2_num[label_id] << 2);
-                    }
+        if (tu_use_jmp(tb)) {
+            for (int i = 0; i < 2; i++) {
+                LataTUEdge *edge = &tb->tu_edges[i];
+                int label_id = edge->branch_offset;
+                if (label_id != LATA_TU_EDGE_OFFSET_INVALID) {
+                    lsassert(label_id > 0 &&
+                             label_id <= lsenv->tr_data->label_num);
+                    lsassertm(label_num_to_ir2_num[label_id] != -1,
+                              "TU jump label %d is not inserted\n", label_id);
+                    edge->branch_offset =
+                        (label_num_to_ir2_num[label_id] << 2);
                 }
             }
-#endif
-        }
-    }
 
+            for (int i = 0; i < 2; i++) {
+                LataTUEdge *edge = &tb->tu_edges[i];
+                if (edge->unlink_stub_offset != TU_UNLINK_STUB_INVALID) {
+                    int label_id = edge->unlink_stub_offset;
+                    lsassert(label_id > 0 &&
+                             label_id <= lsenv->tr_data->label_num);
+                    lsassertm(label_num_to_ir2_num[label_id] != -1,
+                              "TU unlink label %d is not inserted\n",
+                              label_id);
+                    edge->unlink_stub_offset =
+                        (label_num_to_ir2_num[label_id] << 2);
+                }
+            }
+        }
+#endif
+    }
 }
 
 int tr_ir2_assemble(const void *code_start_addr, int max_bytes)
@@ -794,35 +805,62 @@ int tr_ir2_assemble(const void *code_start_addr, int max_bytes)
 
     lata_ir2_peephole_run();
 
-    /* 2. label dispose.  The branch operands are resolved while assembling,
-     * so the IR2 stream is walked only once more. */
+    /* 2. assemble, recording label positions and queueing forward branches. */
     int label_count = lsenv->tr_data->label_num;
     int *label_num_to_ir2_num = (int *)alloca(label_count * 4 + 20);
     memset(label_num_to_ir2_num, -1, label_count * 4 + 20);
-    label_dispose(label_num_to_ir2_num);
+    ensure_pending_branch_capacity(lsenv->tr_data->ir2_inst_num_current);
+    int pending_count = 0;
 
-    /* 3. assemble */
     IR2_INST *pir2 = lsenv->tr_data->first_ir2;
-
     uintptr_t code_addr = (uintptr_t)code_start_addr;
     uintptr_t code_start = (uintptr_t)code_start_addr;
     int code_nr = 0;
 
     while (pir2 != NULL) {
-        if (ir2_opcode(pir2) != LISA_LABEL &&
-            ir2_opcode(pir2) != LISA_X86_INST) {
-            uint32 result;
+        IR2_OPCODE opcode = (IR2_OPCODE)pir2->_opcode;
+
+        if (opcode == LISA_LABEL) {
+            int label_num = ir2_opnd_label_id(&pir2->_opnd[0]);
+            lsassertm(label_num_to_ir2_num[label_num] == -1,
+                      "label %d is in multiple positions\n", label_num);
+            label_num_to_ir2_num[label_num] = code_nr;
+        } else if (opcode != LISA_X86_INST) {
+            uint32 result = 0;
+            IR2_OPND *label_opnd = branch_label_opnd(pir2);
 
             if (max_bytes >= 0 &&
                 (int)(code_addr - code_start) + 4 > max_bytes) {
                 return -1;
             }
-            resolve_branch_label(pir2, code_nr, label_num_to_ir2_num);
+
+            if (label_opnd && ir2_opnd_is_label(label_opnd)) {
+                int label_num = label_opnd->_label_id;
+                int target_ir2_num;
+
+                lsassert(label_num > 0 &&
+                         label_num <= lsenv->tr_data->label_num);
+                target_ir2_num = label_num_to_ir2_num[label_num];
+                if (target_ir2_num >= 0) {
+                    ir2_opnd_convert_label_to_imm(label_opnd,
+                                                  target_ir2_num - code_nr);
+                } else {
+                    pending_branches[pending_count].ir2 = pir2;
+                    pending_branches[pending_count].code_nr = code_nr;
+                    pending_count++;
+                    *(uint32 *)code_addr = 0;
+                    code_addr += 4;
+                    code_nr++;
+                    pir2 = ir2_next(pir2);
+                    continue;
+                }
+            }
+
             result = ir2_assemble(pir2);
 
             if (lata_dump || option_lata_dump_host) {
-                lata_debug_dump_assembled_ir2(pir2->_id, (void *)code_addr, result,
-                                              pir2);
+                lata_debug_dump_assembled_ir2(pir2->_id, (void *)code_addr,
+                                              result, pir2);
             }
 
             *(uint32 *)code_addr = result;
@@ -831,6 +869,30 @@ int tr_ir2_assemble(const void *code_start_addr, int max_bytes)
         }
         pir2 = ir2_next(pir2);
     }
+
+    for (int i = 0; i < pending_count; i++) {
+        IR2_INST *br = pending_branches[i].ir2;
+        int br_nr = pending_branches[i].code_nr;
+        IR2_OPND *label_opnd = branch_label_opnd(br);
+        int label_num = label_opnd->_label_id;
+        int target_ir2_num = label_num_to_ir2_num[label_num];
+        uint32 result;
+
+        lsassertm(target_ir2_num != -1, "label %d is not inserted\n",
+                  label_num);
+        ir2_opnd_convert_label_to_imm(label_opnd, target_ir2_num - br_nr);
+        result = ir2_assemble(br);
+        *(uint32 *)(code_start + br_nr * 4) = result;
+
+        if (lata_dump || option_lata_dump_host) {
+            lata_debug_dump_assembled_ir2(br->_id,
+                                          (void *)(code_start + br_nr * 4),
+                                          result, br);
+        }
+    }
+
+    /* 3. turn any remaining label references into byte offsets. */
+    label_finalize(label_num_to_ir2_num);
 
     return code_nr;
 }

@@ -135,7 +135,6 @@ TranslationBlock *lata_fam_lookup_tb(CPUArchState *env, uint64_t pc,
 void lata_fam_prelink_tb(TranslationBlock *tb);
 
 int tr_ir2_assemble(const void *code_start_addr, int max_bytes);
-void label_dispose(int *label_num_to_ir2_num);
 
 void lata_gen_call_helper_prologue(TCGContext *tcg_ctx);
 void lata_gen_call_helper_epilogue(TCGContext *tcg_ctx);
