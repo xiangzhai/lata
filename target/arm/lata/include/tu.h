@@ -18,8 +18,6 @@ typedef struct TUControl {
     uint32_t ir1_num_in_tu;
     /* all TB pointer in current TU  */
     TranslationBlock *tb_list[MAX_TB_IN_CACHE];
-    /* Search GPC to TB in current TU  */
-    GTree *tree;
 
 } TUControl;
 

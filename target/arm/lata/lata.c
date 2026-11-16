@@ -176,6 +176,7 @@ static __thread ENV lsenv_real;
 static __thread TRANSLATION_DATA tr_data_real;
 __thread TRANSLATION_DATA *tr_data;
 static __thread uint8_t lata_vec_dirty_size[32];
+static __thread uint32_t lata_vec_dirty_mask;
 
 bool lata_dump = 0;
 uint64_t context_switch_bt_to_native;
@@ -657,12 +658,38 @@ int lata_gen_epilogue(TCGContext *tcg_ctx)
     return ins_nr;
 }
 
-void label_dispose(void)
+static void resolve_branch_label(IR2_INST *ir2, int ir2_num,
+                                 int *label_num_to_ir2_num)
+{
+    IR2_OPCODE opcode = ir2->_opcode;
+    IR2_OPND *label_opnd = NULL;
+
+    if (!ir2_opcode_is_branch(opcode) && !ir2_opcode_is_f_branch(opcode)) {
+        return;
+    }
+    if (opcode == LISA_B || opcode == LISA_BL) {
+        label_opnd = &ir2->_opnd[0];
+    } else if (ir2_opcode_is_branch_with_3opnds(opcode)) {
+        label_opnd = &ir2->_opnd[2];
+    } else if (ir2_opcode_is_f_branch(opcode) ||
+               ir2_opcode_is_branch_with_2opnds(opcode)) {
+        label_opnd = &ir2->_opnd[1];
+    }
+    if (label_opnd && ir2_opnd_is_label(label_opnd)) {
+        int label_num = label_opnd->_label_id;
+        int target_ir2_num;
+
+        lsassert(label_num > 0 && label_num <= lsenv->tr_data->label_num);
+        target_ir2_num = label_num_to_ir2_num[label_num];
+        lsassertm(target_ir2_num != -1, "label %d is not inserted\n",
+                  label_num);
+        ir2_opnd_convert_label_to_imm(label_opnd, target_ir2_num - ir2_num);
+    }
+}
+
+void label_dispose(int *label_num_to_ir2_num)
 {
     /* 1. record the positions of label */
-    int *label_num_to_ir2_num =
-        (int *)alloca(lsenv->tr_data->label_num * 4 + 20);
-    memset(label_num_to_ir2_num, -1, lsenv->tr_data->label_num * 4 + 20);
     int ir2_num = 0;
     IR2_INST *ir2_current = lsenv->tr_data->first_ir2;
     while (ir2_current != NULL) {
@@ -754,39 +781,6 @@ void label_dispose(void)
         }
     }
 
-    /* 3. resolve the branch instructions */
-    ir2_num = 0;
-    ir2_current = lsenv->tr_data->first_ir2;
-    while (ir2_current != NULL) {
-        IR2_OPCODE opcode = ir2_current->_opcode;
-        if (ir2_opcode_is_branch(opcode) || ir2_opcode_is_f_branch(opcode)) {
-            IR2_OPND *label_opnd = NULL;
-            if (ir2_current->_opcode == LISA_B ||
-                ir2_current->_opcode == LISA_BL) {
-                label_opnd = &ir2_current->_opnd[0];
-            } else if (ir2_opcode_is_branch_with_3opnds(opcode)) {
-                label_opnd = &ir2_current->_opnd[2];
-            } else if (ir2_opcode_is_f_branch(opcode) ||
-                       ir2_opcode_is_branch_with_2opnds(opcode)) {
-                label_opnd = &ir2_current->_opnd[1];
-            }
-            if(label_opnd && ir2_opnd_is_label(label_opnd)) {
-                int label_num = label_opnd->_label_id;
-                lsassert(label_num > 0 && label_num <= lsenv->tr_data->label_num);
-                int target_ir2_num = label_num_to_ir2_num[label_num];
-                lsassertm(target_ir2_num != -1, "label %d is not inserted\n",
-                          label_num);
-                ir2_opnd_convert_label_to_imm(label_opnd,
-                                              target_ir2_num - ir2_num);
-            }
-        }
-
-        if (ir2_current->_opcode != LISA_LABEL &&
-            ir2_current->_opcode != LISA_X86_INST) {
-            ir2_num++;
-        }
-        ir2_current = ir2_next(ir2_current);
-    }
 }
 
 int tr_ir2_assemble(const void *code_start_addr, int max_bytes)
@@ -800,8 +794,12 @@ int tr_ir2_assemble(const void *code_start_addr, int max_bytes)
 
     lata_ir2_peephole_run();
 
-    /* 2. label dispose */
-    label_dispose();
+    /* 2. label dispose.  The branch operands are resolved while assembling,
+     * so the IR2 stream is walked only once more. */
+    int label_count = lsenv->tr_data->label_num;
+    int *label_num_to_ir2_num = (int *)alloca(label_count * 4 + 20);
+    memset(label_num_to_ir2_num, -1, label_count * 4 + 20);
+    label_dispose(label_num_to_ir2_num);
 
     /* 3. assemble */
     IR2_INST *pir2 = lsenv->tr_data->first_ir2;
@@ -819,6 +817,7 @@ int tr_ir2_assemble(const void *code_start_addr, int max_bytes)
                 (int)(code_addr - code_start) + 4 > max_bytes) {
                 return -1;
             }
+            resolve_branch_label(pir2, code_nr, label_num_to_ir2_num);
             result = ir2_assemble(pir2);
 
             if (lata_dump || option_lata_dump_host) {
@@ -854,12 +853,14 @@ static void lata_flush_writes_before_helper(void)
 void lata_vec_dirty_reset(void)
 {
     memset(lata_vec_dirty_size, 0, sizeof(lata_vec_dirty_size));
+    lata_vec_dirty_mask = 0;
 }
 
 void lata_vec_mark_dirty(unsigned reg, unsigned size)
 {
     if (reg < 32 && size < 4) {
         lata_vec_dirty_size[reg] = size + 1;
+        lata_vec_dirty_mask |= 1u << reg;
     }
 }
 
@@ -867,6 +868,7 @@ void lata_vec_mark_clean(unsigned reg)
 {
     if (reg < 32) {
         lata_vec_dirty_size[reg] = 0;
+        lata_vec_dirty_mask &= ~(1u << reg);
     }
 }
 
@@ -919,12 +921,18 @@ void lata_vec_materialize_dirty(unsigned reg)
     store_fpr_dst(reg, vreg);
     free_alloc_fpr(vreg);
     lata_vec_dirty_size[reg] = 0;
+    lata_vec_dirty_mask &= ~(1u << reg);
 }
 
 void lata_vec_materialize_all_dirty(void)
 {
-    for (unsigned i = 0; i < 32; i++) {
-        lata_vec_materialize_dirty(i);
+    uint32_t dirty = lata_vec_dirty_mask;
+
+    while (dirty) {
+        unsigned reg = __builtin_ctz(dirty);
+
+        dirty &= dirty - 1;
+        lata_vec_materialize_dirty(reg);
     }
 }
 

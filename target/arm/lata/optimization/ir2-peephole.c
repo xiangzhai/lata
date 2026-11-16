@@ -40,12 +40,15 @@ typedef struct LataIR2RegAccess {
     bool unknown_boundary;
 } LataIR2RegAccess;
 
-typedef LataPeepholePassResult (*LataPeepholePassFn)(IR2_INST *ir2);
-
-typedef struct LataPeepholePass {
-    LataPeepholePassFn fn;
-} LataPeepholePass;
-
+typedef struct LataIR2OpClass {
+    bool is_control;
+    bool is_memory;
+    bool is_simple_gpr_alu;
+    bool is_gpr_to_fpr;
+    bool is_fpr_to_gpr;
+    bool is_load;
+    bool is_store;
+} LataIR2OpClass;
 /*
  * TB assembly may run concurrently for different guest threads.  These
  * scratch arrays describe the IR2 stream currently being optimized, so they
@@ -57,6 +60,77 @@ static __thread int protected_raw_branch_targets_len;
 static __thread int *raw_branch_old_id_to_index;
 static __thread int *raw_branch_old_index_to_id;
 static __thread int raw_branch_old_count;
+static __thread int raw_branch_scratch_cap;
+static __thread int *reloc_new_id_to_index;
+static __thread int reloc_new_id_to_index_cap;
+
+/*
+ * Every peephole pass asks for the same per-instruction register access facts.
+ * Cache them by IR2 id for the duration of one peephole run; a generation
+ * counter avoids clearing the cache between translation blocks, and the cache
+ * is invalidated whenever a pass rewrites an instruction's register operands.
+ */
+static __thread LataIR2RegAccess *access_cache;
+static __thread uint32_t *access_cache_gen;
+static __thread int access_cache_len;
+static __thread uint32_t access_cache_current_gen;
+
+/*
+ * Boundary classification depends only on the IR2 opcode, so precompute it
+ * once.  This lets the passes answer the very common "is this a window
+ * boundary / control boundary?" question with a table lookup instead of
+ * recomputing per-instruction access facts.
+ */
+#define LATA_OPB_CONTROL      (1u << 0)
+#define LATA_OPB_MEMORY       (1u << 1)
+#define LATA_OPB_SIDE_EFFECT  (1u << 2)
+#define LATA_OPB_UNKNOWN      (1u << 3)
+#define LATA_OPB_WINDOW       (LATA_OPB_CONTROL | LATA_OPB_MEMORY | \
+                               LATA_OPB_SIDE_EFFECT | LATA_OPB_UNKNOWN)
+
+static uint8_t opcode_boundary_flags[LISA_ENDING + 1];
+static gsize opcode_boundary_once;
+
+static void opcode_boundary_init(void);
+
+static void access_cache_begin(int max_id)
+{
+    opcode_boundary_init();
+    if (access_cache_len < max_id) {
+        int old_len = access_cache_len;
+
+        access_cache = g_renew(LataIR2RegAccess, access_cache, max_id);
+        access_cache_gen = g_renew(uint32_t, access_cache_gen, max_id);
+        memset(access_cache_gen + old_len, 0,
+               sizeof(*access_cache_gen) * (max_id - old_len));
+        access_cache_len = max_id;
+    }
+    access_cache_current_gen++;
+    if (access_cache_current_gen == 0) {
+        if (access_cache_len) {
+            memset(access_cache_gen, 0,
+                   sizeof(*access_cache_gen) * access_cache_len);
+        }
+        access_cache_current_gen = 1;
+    }
+}
+
+/* Hot-path copies of ir2_next()/ir2_prev() so the pass loops can inline them. */
+static inline IR2_INST *peephole_next(const IR2_INST *ir2)
+{
+    if (ir2->_next == -1) {
+        return NULL;
+    }
+    return lsenv->tr_data->ir2_inst_array + ir2->_next;
+}
+
+static inline IR2_INST *peephole_prev(const IR2_INST *ir2)
+{
+    if (ir2->_prev == -1) {
+        return NULL;
+    }
+    return lsenv->tr_data->ir2_inst_array + ir2->_prev;
+}
 
 static bool ir2_is_zero_gpr(const IR2_OPND *opnd)
 {
@@ -126,14 +200,6 @@ static bool ir2_opcode_is_barrier(IR2_OPCODE opcode)
     default:
         return false;
     }
-}
-
-static bool ir2_opcode_is_memory(IR2_OPCODE opcode)
-{
-    return la_ir2_opcode_is_load(opcode) || la_ir2_opcode_is_store(opcode) ||
-           (opcode >= LISA_LDX_B && opcode <= LISA_XVSTX) ||
-           (opcode >= LISA_AMSWAP_W && opcode <= LISA_AMMIN_DB_DU) ||
-           (opcode >= LISA_FLDGT_S && opcode <= LISA_STLE_D);
 }
 
 static bool ir2_opcode_is_implicit_state(IR2_OPCODE opcode)
@@ -278,14 +344,67 @@ static bool ir2_opcode_is_simple_gpr_alu(IR2_OPCODE opcode)
     }
 }
 
-static LataIROpAccess gpr_op_access(IR2_INST *ir2, int opnd)
+static void opcode_boundary_init(void)
 {
-    IR2_OPCODE opcode = ir2_opcode(ir2);
-
-    if (opnd >= ir2->op_count || !ir2_opnd_is_ireg(&ir2->_opnd[opnd])) {
-        return LATA_IR2_ACCESS_NONE;
+    if (!g_once_init_enter(&opcode_boundary_once)) {
+        return;
     }
 
+    for (int i = 0; i <= LISA_ENDING; i++) {
+        IR2_OPCODE opcode = (IR2_OPCODE)i;
+        bool is_load = la_ir2_opcode_is_load(opcode);
+        bool is_store = la_ir2_opcode_is_store(opcode);
+        bool memory = is_load || is_store ||
+                      (opcode >= LISA_LDX_B && opcode <= LISA_XVSTX) ||
+                      (opcode >= LISA_AMSWAP_W && opcode <= LISA_AMMIN_DB_DU) ||
+                      (opcode >= LISA_FLDGT_S && opcode <= LISA_STLE_D);
+        bool control = opcode == LISA_LABEL || opcode == LISA_X86_INST ||
+                       ir2_opcode_is_control(opcode);
+        bool side_effect = control || memory ||
+                           ir2_opcode_is_barrier(opcode) ||
+                           ir2_opcode_is_implicit_state(opcode);
+        bool unknown = !ir2_opcode_is_simple_gpr_alu(opcode) &&
+                       !side_effect && opcode < LISA_FADD_S;
+        uint8_t flags = 0;
+
+        if (control) {
+            flags |= LATA_OPB_CONTROL;
+        }
+        if (memory) {
+            flags |= LATA_OPB_MEMORY;
+        }
+        if (side_effect) {
+            flags |= LATA_OPB_SIDE_EFFECT;
+        }
+        if (unknown) {
+            flags |= LATA_OPB_UNKNOWN;
+        }
+        if (control || memory || side_effect || unknown) {
+            flags |= LATA_OPB_WINDOW;
+        }
+        opcode_boundary_flags[i] = flags;
+    }
+
+    g_once_init_leave(&opcode_boundary_once, 1);
+}
+
+static void ir2_classify_opcode(IR2_OPCODE opcode, LataIR2OpClass *cls)
+{
+    cls->is_load = la_ir2_opcode_is_load(opcode);
+    cls->is_store = la_ir2_opcode_is_store(opcode);
+    cls->is_memory = cls->is_load || cls->is_store ||
+                     (opcode >= LISA_LDX_B && opcode <= LISA_XVSTX) ||
+                     (opcode >= LISA_AMSWAP_W && opcode <= LISA_AMMIN_DB_DU) ||
+                     (opcode >= LISA_FLDGT_S && opcode <= LISA_STLE_D);
+    cls->is_control = ir2_opcode_is_control(opcode);
+    cls->is_simple_gpr_alu = ir2_opcode_is_simple_gpr_alu(opcode);
+    cls->is_gpr_to_fpr = ir2_opcode_is_gpr_to_fpr(opcode);
+    cls->is_fpr_to_gpr = ir2_opcode_is_fpr_to_gpr(opcode);
+}
+
+static LataIROpAccess gpr_op_access(IR2_OPCODE opcode, int opnd,
+                                    const LataIR2OpClass *cls)
+{
     if (opcode == LISA_BSTRINS_W || opcode == LISA_BSTRINS_D) {
         if (opnd == 0) {
             return LATA_IR2_ACCESS_READWRITE;
@@ -310,14 +429,14 @@ static LataIROpAccess gpr_op_access(IR2_INST *ir2, int opnd)
         break;
     }
 
-    if (ir2_opcode_is_gpr_to_fpr(opcode)) {
+    if (cls->is_gpr_to_fpr) {
         return opnd == 1 ? LATA_IR2_ACCESS_READ : LATA_IR2_ACCESS_NONE;
     }
-    if (ir2_opcode_is_fpr_to_gpr(opcode)) {
+    if (cls->is_fpr_to_gpr) {
         return opnd == 0 ? LATA_IR2_ACCESS_WRITE : LATA_IR2_ACCESS_NONE;
     }
 
-    if (ir2_opcode_is_control(opcode)) {
+    if (cls->is_control) {
         if (opcode == LISA_JIRL) {
             return opnd == 0 ? LATA_IR2_ACCESS_WRITE :
                    opnd == 1 ? LATA_IR2_ACCESS_READ : LATA_IR2_ACCESS_NONE;
@@ -325,45 +444,41 @@ static LataIROpAccess gpr_op_access(IR2_INST *ir2, int opnd)
         return LATA_IR2_ACCESS_READ;
     }
 
-    if (ir2_opcode_is_memory(opcode)) {
-        return opnd == 0 && la_ir2_opcode_is_load(opcode) ?
+    if (cls->is_memory) {
+        return opnd == 0 && cls->is_load ?
                LATA_IR2_ACCESS_WRITE : LATA_IR2_ACCESS_READ;
     }
 
-    if (ir2_opcode_is_simple_gpr_alu(opcode)) {
+    if (cls->is_simple_gpr_alu) {
         return opnd == 0 ? LATA_IR2_ACCESS_WRITE : LATA_IR2_ACCESS_READ;
     }
 
     return LATA_IR2_ACCESS_READWRITE;
 }
 
-static LataIROpAccess fpr_op_access(IR2_INST *ir2, int opnd)
+static LataIROpAccess fpr_op_access(IR2_OPCODE opcode, int opnd,
+                                    const LataIR2OpClass *cls)
 {
-    IR2_OPCODE opcode = ir2_opcode(ir2);
-
-    if (opnd >= ir2->op_count || !ir2_opnd_is_freg(&ir2->_opnd[opnd])) {
-        return LATA_IR2_ACCESS_NONE;
-    }
-    if (la_ir2_opcode_is_store(opcode) || opcode == LISA_MOVFR2GR_S ||
+    if (cls->is_store || opcode == LISA_MOVFR2GR_S ||
         opcode == LISA_MOVFR2GR_D || opcode == LISA_MOVFRH2GR_S ||
         opcode == LISA_MOVFR2CF) {
         return LATA_IR2_ACCESS_READ;
     }
-    if (la_ir2_opcode_is_load(opcode) || opcode == LISA_MOVGR2FR_W ||
+    if (cls->is_load || opcode == LISA_MOVGR2FR_W ||
         opcode == LISA_MOVGR2FR_D || opcode == LISA_MOVGR2FRH_W ||
         opcode == LISA_MOVCF2FR) {
         return opnd == 0 ? LATA_IR2_ACCESS_WRITE : LATA_IR2_ACCESS_READ;
     }
-    if (ir2_opcode_is_gpr_to_fpr(opcode)) {
+    if (cls->is_gpr_to_fpr) {
         return opnd == 0 ? LATA_IR2_ACCESS_READWRITE : LATA_IR2_ACCESS_NONE;
     }
-    if (ir2_opcode_is_fpr_to_gpr(opcode)) {
+    if (cls->is_fpr_to_gpr) {
         return opnd == 1 ? LATA_IR2_ACCESS_READ : LATA_IR2_ACCESS_NONE;
     }
     return opnd == 0 ? LATA_IR2_ACCESS_WRITE : LATA_IR2_ACCESS_READ;
 }
 
-static void access_mark_gpr(LataIR2RegAccess *access, int reg,
+static inline void access_mark_gpr(LataIR2RegAccess *access, int reg,
                             LataIROpAccess kind)
 {
     if (reg < 0 || reg >= 32 || reg == la_zero) {
@@ -377,7 +492,7 @@ static void access_mark_gpr(LataIR2RegAccess *access, int reg,
     }
 }
 
-static void access_mark_fpr(LataIR2RegAccess *access, int reg,
+static inline void access_mark_fpr(LataIR2RegAccess *access, int reg,
                             LataIROpAccess kind)
 {
     if (reg < 0 || reg >= 32) {
@@ -391,39 +506,69 @@ static void access_mark_fpr(LataIR2RegAccess *access, int reg,
     }
 }
 
-static LataIR2RegAccess ir2_get_access(IR2_INST *ir2)
+static LataIR2RegAccess ir2_compute_access(IR2_INST *ir2)
 {
     LataIR2RegAccess access = { 0 };
     IR2_OPCODE opcode = ir2_opcode(ir2);
+    LataIR2OpClass cls;
 
-    access.control_boundary = ir2_is_meta(ir2) || ir2_opcode_is_control(opcode);
-    access.memory_boundary = ir2_opcode_is_memory(opcode);
-    access.may_have_side_effects = access.control_boundary ||
-                                   access.memory_boundary ||
-                                   ir2_opcode_is_barrier(opcode) ||
-                                   ir2_opcode_is_implicit_state(opcode);
-    access.unknown_boundary = !ir2_opcode_is_simple_gpr_alu(opcode) &&
-                              !access.may_have_side_effects &&
-                              opcode < LISA_FADD_S;
+    uint8_t flags = opcode_boundary_flags[(uint16_t)opcode];
+
+    ir2_classify_opcode(opcode, &cls);
+
+    access.control_boundary = flags & LATA_OPB_CONTROL;
+    access.memory_boundary = flags & LATA_OPB_MEMORY;
+    access.may_have_side_effects = flags & LATA_OPB_SIDE_EFFECT;
+    access.unknown_boundary = flags & LATA_OPB_UNKNOWN;
 
     for (int i = 0; i < ir2->op_count; i++) {
-        if (ir2_opnd_is_ireg(&ir2->_opnd[i])) {
-            access_mark_gpr(&access, ir2_opnd_base_reg_num(&ir2->_opnd[i]),
-                            gpr_op_access(ir2, i));
-        } else if (ir2_opnd_is_freg(&ir2->_opnd[i])) {
-            access_mark_fpr(&access, ir2_opnd_base_reg_num(&ir2->_opnd[i]),
-                            fpr_op_access(ir2, i));
+        IR2_OPND *opnd = &ir2->_opnd[i];
+
+        if (opnd->_type == IR2_OPND_GPR) {
+            access_mark_gpr(&access, opnd->_reg_num,
+                            gpr_op_access(opcode, i, &cls));
+        } else if (opnd->_type == IR2_OPND_FPR) {
+            access_mark_fpr(&access, opnd->_reg_num,
+                            fpr_op_access(opcode, i, &cls));
         }
     }
     return access;
 }
 
-static bool ir2_is_window_boundary(IR2_INST *ir2)
+static inline const LataIR2RegAccess *ir2_get_access(IR2_INST *ir2)
 {
-    LataIR2RegAccess access = ir2_get_access(ir2);
+    static __thread LataIR2RegAccess uncached;
+    int id = ir2_get_id(ir2);
 
-    return access.control_boundary || access.memory_boundary ||
-           access.may_have_side_effects || access.unknown_boundary;
+    if (id >= 0 && id < access_cache_len) {
+        if (access_cache_gen[id] == access_cache_current_gen) {
+            return &access_cache[id];
+        }
+        access_cache[id] = ir2_compute_access(ir2);
+        access_cache_gen[id] = access_cache_current_gen;
+        return &access_cache[id];
+    }
+    uncached = ir2_compute_access(ir2);
+    return &uncached;
+}
+
+static void ir2_invalidate_access(IR2_INST *ir2)
+{
+    int id = ir2_get_id(ir2);
+
+    if (id >= 0 && id < access_cache_len) {
+        access_cache_gen[id] = 0;
+    }
+}
+
+static inline bool ir2_is_window_boundary(const IR2_INST *ir2)
+{
+    return opcode_boundary_flags[(uint16_t)ir2->_opcode] & LATA_OPB_WINDOW;
+}
+
+static inline bool ir2_is_control_boundary(const IR2_INST *ir2)
+{
+    return opcode_boundary_flags[(uint16_t)ir2->_opcode] & LATA_OPB_CONTROL;
 }
 
 static int build_assembled_index_map(int *id_to_index, int *index_to_id,
@@ -431,7 +576,7 @@ static int build_assembled_index_map(int *id_to_index, int *index_to_id,
 {
     int index = 0;
 
-    for (IR2_INST *it = lsenv->tr_data->first_ir2; it; it = ir2_next(it)) {
+    for (IR2_INST *it = lsenv->tr_data->first_ir2; it; it = peephole_next(it)) {
         int id = ir2_get_id(it);
 
         if (id >= 0 && id < max_id && !ir2_is_meta(it)) {
@@ -445,15 +590,27 @@ static int build_assembled_index_map(int *id_to_index, int *index_to_id,
     return index;
 }
 
+static void ensure_raw_branch_scratch(int max_id)
+{
+    if (raw_branch_scratch_cap < max_id) {
+        protected_raw_branch_targets =
+            g_renew(bool, protected_raw_branch_targets, max_id);
+        raw_branch_old_id_to_index =
+            g_renew(int, raw_branch_old_id_to_index, max_id);
+        raw_branch_old_index_to_id =
+            g_renew(int, raw_branch_old_index_to_id, max_id);
+        raw_branch_scratch_cap = max_id;
+    }
+}
+
 static void protect_raw_branch_targets(void)
 {
     TRANSLATION_DATA *t = lsenv->tr_data;
     int max_id = t->ir2_inst_num_current;
 
-    protected_raw_branch_targets = g_new0(bool, max_id);
+    ensure_raw_branch_scratch(max_id);
+    memset(protected_raw_branch_targets, 0, sizeof(*protected_raw_branch_targets) * max_id);
     protected_raw_branch_targets_len = max_id;
-    raw_branch_old_id_to_index = g_new(int, max_id);
-    raw_branch_old_index_to_id = g_new(int, max_id);
     for (int i = 0; i < max_id; i++) {
         raw_branch_old_id_to_index[i] = -1;
         raw_branch_old_index_to_id[i] = -1;
@@ -462,7 +619,7 @@ static void protect_raw_branch_targets(void)
     raw_branch_old_count = build_assembled_index_map(raw_branch_old_id_to_index,
                                                      raw_branch_old_index_to_id,
                                                      max_id);
-    for (IR2_INST *it = t->first_ir2; it; it = ir2_next(it)) {
+    for (IR2_INST *it = t->first_ir2; it; it = peephole_next(it)) {
         IR2_OPND *opnd = pc_relative_branch_opnd(it);
         int id = ir2_get_id(it);
 
@@ -493,15 +650,21 @@ static void relocate_raw_branches(void)
 {
     TRANSLATION_DATA *t = lsenv->tr_data;
     int max_id = t->ir2_inst_num_current;
-    g_autofree int *new_id_to_index = g_new(int, max_id);
+    int *new_id_to_index;
 
+    if (reloc_new_id_to_index_cap < max_id) {
+        reloc_new_id_to_index =
+            g_renew(int, reloc_new_id_to_index, max_id);
+        reloc_new_id_to_index_cap = max_id;
+    }
+    new_id_to_index = reloc_new_id_to_index;
     for (int i = 0; i < max_id; i++) {
         new_id_to_index[i] = -1;
     }
 
     build_assembled_index_map(new_id_to_index, NULL, max_id);
 
-    for (IR2_INST *it = t->first_ir2; it; it = ir2_next(it)) {
+    for (IR2_INST *it = t->first_ir2; it; it = peephole_next(it)) {
         IR2_OPND *opnd = pc_relative_branch_opnd(it);
         int id = ir2_get_id(it);
 
@@ -530,12 +693,10 @@ static void relocate_raw_branches(void)
 
 static void clear_raw_branch_protection(void)
 {
-    g_free(protected_raw_branch_targets);
-    g_free(raw_branch_old_id_to_index);
-    g_free(raw_branch_old_index_to_id);
-    protected_raw_branch_targets = NULL;
-    raw_branch_old_id_to_index = NULL;
-    raw_branch_old_index_to_id = NULL;
+    /*
+     * The scratch arrays are reused across translation blocks; only the
+     * lengths need to be reset so the next run starts from a clean state.
+     */
     protected_raw_branch_targets_len = 0;
     raw_branch_old_count = 0;
 }
@@ -620,14 +781,6 @@ static bool is_self_addi_d(IR2_INST *ir2)
            ir2_is_same_ireg(&ir2->_opnd[0], &ir2->_opnd[1]);
 }
 
-static bool ir2_touches_gpr(IR2_INST *ir2, unsigned reg)
-{
-    LataIR2RegAccess access = ir2_get_access(ir2);
-    uint32_t bit = 1u << reg;
-
-    return (access.gpr_use | access.gpr_def) & bit;
-}
-
 static LataPeepholePassResult fold_window_candidate(IR2_INST *ir2,
                                                     IR2_INST *candidate)
 {
@@ -659,7 +812,17 @@ static LataPeepholePassResult fold_window_candidate(IR2_INST *ir2,
 static LataPeepholePassResult pass_small_window(IR2_INST *ir2)
 {
     IR2_INST *scan_end = ir2;
+    IR2_OPCODE opcode = ir2_opcode(ir2);
 
+    /*
+     * Only self-masking BSTRPICKs and self-ADDI.D are candidates here.  Test
+     * the opcode first so the common instruction pays a single comparison
+     * instead of building a full register-access fact.
+     */
+    if (opcode != LISA_BSTRPICK_D && opcode != LISA_BSTRPICK_W &&
+        opcode != LISA_ADDI_D) {
+        return LATA_PASS_NO_CHANGE;
+    }
     if (!(is_self_high_clear(ir2) || is_self_addr_wrap(ir2) ||
           is_self_addi_d(ir2)) ||
         ir2_is_window_boundary(ir2)) {
@@ -671,15 +834,17 @@ static LataPeepholePassResult pass_small_window(IR2_INST *ir2)
         return LATA_PASS_NO_CHANGE;
     }
     for (int i = 0; i < 8 && scan_end; i++) {
-        scan_end = ir2_next(scan_end);
+        scan_end = peephole_next(scan_end);
     }
 
-    for (IR2_INST *it = ir2_next(ir2), *last = NULL;
+    for (IR2_INST *it = peephole_next(ir2), *last = NULL;
          it && last != it && scan_end != it;
-         last = it, it = ir2_next(it)) {
+         last = it, it = peephole_next(it)) {
+        const LataIR2RegAccess *access;
         LataPeepholePassResult result;
 
-        if (ir2_is_protected_raw_branch_target(it) || ir2_is_window_boundary(it)) {
+        if (ir2_is_protected_raw_branch_target(it) ||
+            ir2_is_window_boundary(it)) {
             return LATA_PASS_NO_CHANGE;
         }
 
@@ -688,7 +853,8 @@ static LataPeepholePassResult pass_small_window(IR2_INST *ir2)
             return result;
         }
 
-        if (ir2_touches_gpr(it, reg)) {
+        access = ir2_get_access(it);
+        if ((access->gpr_use | access->gpr_def) & (1u << reg)) {
             return LATA_PASS_NO_CHANGE;
         }
     }
@@ -697,8 +863,13 @@ static LataPeepholePassResult pass_small_window(IR2_INST *ir2)
 
 static LataPeepholePassResult pass_duplicate_bstrpick(IR2_INST *ir2)
 {
-    IR2_INST *next = ir2_next(ir2);
+    IR2_OPCODE opcode = ir2_opcode(ir2);
+    IR2_INST *next;
 
+    if (opcode != LISA_BSTRPICK_D && opcode != LISA_BSTRPICK_W) {
+        return LATA_PASS_NO_CHANGE;
+    }
+    next = peephole_next(ir2);
     if (!next || ir2_is_window_boundary(ir2) || ir2_is_window_boundary(next)) {
         return LATA_PASS_NO_CHANGE;
     }
@@ -743,12 +914,20 @@ static bool is_self_add_zero(IR2_INST *ir2)
 
 static LataPeepholePassResult pass_remove_noop(IR2_INST *ir2)
 {
-    IR2_INST *prev = ir2_prev(ir2);
-    IR2_INST *next = ir2_next(ir2);
+    IR2_OPCODE opcode = ir2_opcode(ir2);
+    IR2_INST *prev;
+    IR2_INST *next;
+
+    if (opcode != LISA_ADDI_D && opcode != LISA_ADD_D &&
+        opcode != LISA_OR && opcode != LISA_XOR) {
+        return LATA_PASS_NO_CHANGE;
+    }
+    prev = peephole_prev(ir2);
+    next = peephole_next(ir2);
 
     if (ir2_is_window_boundary(ir2) ||
-        (prev && ir2_get_access(prev).control_boundary) ||
-        (next && ir2_get_access(next).control_boundary)) {
+        (prev && ir2_is_control_boundary(prev)) ||
+        (next && ir2_is_control_boundary(next))) {
         return LATA_PASS_NO_CHANGE;
     }
     if (is_self_add_zero(ir2) && !ir2_is_protected_raw_branch_target(ir2)) {
@@ -778,8 +957,12 @@ static IR2_OPND *mov_gpr_src(IR2_INST *ir2)
 
 static LataPeepholePassResult pass_move_chain(IR2_INST *ir2)
 {
-    IR2_INST *next = ir2_next(ir2);
+    IR2_INST *next;
 
+    if (ir2_opcode(ir2) != LISA_OR) {
+        return LATA_PASS_NO_CHANGE;
+    }
+    next = peephole_next(ir2);
     if (!next || ir2_is_window_boundary(ir2) || ir2_is_window_boundary(next)) {
         return LATA_PASS_NO_CHANGE;
     }
@@ -799,16 +982,20 @@ static LataPeepholePassResult pass_move_chain(IR2_INST *ir2)
     }
 
     *next_src = *src;
+    ir2_invalidate_access(next);
     stats_record(LATA_PH_REWRITE_MOVE_CHAIN);
     return LATA_PASS_RESCAN_CURRENT;
 }
 
 static LataPeepholePassResult pass_combine_addi(IR2_INST *ir2)
 {
-    IR2_INST *next = ir2_next(ir2);
+    IR2_INST *next;
 
-    if (!next || ir2_opcode(ir2) != ir2_opcode(next) ||
-        ir2_opcode(ir2) != LISA_ADDI_D ||
+    if (ir2_opcode(ir2) != LISA_ADDI_D) {
+        return LATA_PASS_NO_CHANGE;
+    }
+    next = peephole_next(ir2);
+    if (!next || ir2_opcode(next) != LISA_ADDI_D ||
         ir2_is_window_boundary(ir2) || ir2_is_window_boundary(next)) {
         return LATA_PASS_NO_CHANGE;
     }
@@ -833,47 +1020,85 @@ static LataPeepholePassResult pass_combine_addi(IR2_INST *ir2)
     return LATA_PASS_RESCAN_CURRENT;
 }
 
-static uint64_t run_pass(const LataPeepholePass *pass)
+/*
+ * The individual passes only match a few opcodes and only ever change the
+ * current instruction or look forward.  Running them from one forward walk
+ * therefore performs the same folds as the old seven full-list passes while
+ * touching each instruction once.  Per-opcode dispatch keeps the expensive
+ * register-access checks off instructions no pass can rewrite.
+ */
+static LataPeepholePassResult run_combined_pass(IR2_INST *ir2)
 {
-    uint64_t changed = 0;
-    IR2_INST *ir2 = lsenv->tr_data->first_ir2;
+    LataPeepholePassResult result;
 
     peephole_stats.passes++;
 
-    while (ir2) {
-        IR2_INST *next = ir2_next(ir2);
-        LataPeepholePassResult result = pass->fn(ir2);
-
-        if (result != LATA_PASS_NO_CHANGE) {
-            changed++;
-            ir2 = result == LATA_PASS_RESCAN_CURRENT ? ir2 : next;
-            continue;
+    switch (ir2_opcode(ir2)) {
+    case LISA_BSTRPICK_D:
+    case LISA_BSTRPICK_W:
+        result = pass_duplicate_bstrpick(ir2);
+        if (result == LATA_PASS_NO_CHANGE) {
+            result = pass_small_window(ir2);
         }
-        ir2 = next;
+        return result;
+    case LISA_ADDI_D:
+        result = pass_remove_noop(ir2);
+        if (result == LATA_PASS_NO_CHANGE) {
+            result = pass_combine_addi(ir2);
+        }
+        if (result == LATA_PASS_NO_CHANGE) {
+            result = pass_small_window(ir2);
+        }
+        return result;
+    case LISA_ADD_D:
+    case LISA_XOR:
+        return pass_remove_noop(ir2);
+    case LISA_OR:
+        result = pass_remove_noop(ir2);
+        if (result == LATA_PASS_NO_CHANGE) {
+            result = pass_move_chain(ir2);
+        }
+        return result;
+    default:
+        return LATA_PASS_NO_CHANGE;
     }
-
-    return changed;
 }
 
 void lata_ir2_peephole_run(void)
 {
-    static const LataPeepholePass passes[] = {
-        { pass_duplicate_bstrpick },
-        { pass_remove_noop },
-        { pass_move_chain },
-        { pass_combine_addi },
-        { pass_small_window },
-        { pass_duplicate_bstrpick },
-        { pass_remove_noop },
-    };
+    IR2_INST *ir2;
+    uint64_t removed_before = peephole_stats.removed_total;
 
     peephole_stats.runs++;
 
+    access_cache_begin(lsenv->tr_data->ir2_inst_num_current);
     protect_raw_branch_targets();
-    for (int i = 0; i < ARRAY_SIZE(passes); i++) {
-        run_pass(&passes[i]);
+
+    ir2 = lsenv->tr_data->first_ir2;
+    while (ir2) {
+        IR2_INST *next = peephole_next(ir2);
+        LataPeepholePassResult result = run_combined_pass(ir2);
+
+        if (result == LATA_PASS_RESCAN_CURRENT) {
+            continue;
+        }
+        if (result == LATA_PASS_CONTINUE_NEXT) {
+            /* The current instruction was removed, so use the successor that
+             * was captured before the pass ran. */
+            ir2 = next;
+            continue;
+        }
+        ir2 = next;
     }
-    relocate_raw_branches();
+    /*
+     * Relative branch operands are measured in assembled instruction indices.
+     * Those indices only move when an instruction is actually removed, so the
+     * relocation scan is a no-op for the common case where peephole found
+     * nothing to fold away.
+     */
+    if (peephole_stats.removed_total != removed_before) {
+        relocate_raw_branches();
+    }
     clear_raw_branch_protection();
 }
 

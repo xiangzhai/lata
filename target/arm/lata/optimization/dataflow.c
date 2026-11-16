@@ -1797,8 +1797,21 @@ void lata_df_analyze_tu(TranslationBlock **tb_list, uint32_t tb_count)
 {
     bool changed;
 
+    /*
+     * Each TB's per-IR1 facts are produced once by target_disasm(), which
+     * calls lata_df_analyze_tb() when the TB is translated.  TBs reused from
+     * an earlier TU already carry those facts too, and they never change for
+     * a given TB, so only analyze the (rare) TB that was never processed.
+     * Re-running the full fact extraction here doubled the dataflow cost of
+     * every translation.
+     */
     for (uint32_t i = 0; i < tb_count; i++) {
-        lata_df_analyze_tb(tb_list[i]);
+        TranslationBlock *tb = tb_list[i];
+
+        if (tb && tb->icount &&
+            (!tb->lata_df_ir1 || tb->lata_df_ir1_count != tb->icount)) {
+            lata_df_analyze_tb(tb);
+        }
     }
 
     do {

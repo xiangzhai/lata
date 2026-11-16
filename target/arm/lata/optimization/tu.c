@@ -78,43 +78,27 @@ DisasContext *tu_ir1_alloc(uint32_t count)
     return slot;
 }
 
-static inline void tu_trees_reset(void)
-{
-    /* Increment the refcount first so that destroy acts as a reset */
-    g_tree_ref(tu_data->tree);
-    g_tree_destroy(tu_data->tree);
-}
-
+/*
+ * The lookup scope is the current translation unit, which holds at most
+ * MAX_TB_IN_CACHE (~60) blocks.  A linear scan over that array is both faster
+ * and allocation-free compared with the old GTree, which had to be rebuilt on
+ * every TU and dominated translation time for small blocks.
+ */
 TranslationBlock *tu_tree_lookup(target_ulong pc, target_ulong cs_base,
                                  uint32_t flags, int cflags)
 {
-    TranslationBlock key = {.pc = pc};
-    TranslationBlock *tb = (TranslationBlock *)g_tree_lookup(tu_data->tree,
-                                                             &key);
+    uint32_t cflags_key = cflags & ~CF_INVALID;
 
-    if (!tb || tb->cs_base != cs_base || tb->flags != flags ||
-        (tb_cflags(tb) & ~CF_INVALID) != (cflags & ~CF_INVALID)) {
-        return NULL;
+    for (uint32_t i = 0; i < tu_data->tb_num; i++) {
+        TranslationBlock *tb = tu_data->tb_list[i];
+
+        if (tb && tb->pc == pc && tb->cs_base == cs_base &&
+            tb->flags == flags &&
+            (tb_cflags(tb) & ~CF_INVALID) == cflags_key) {
+            return tb;
+        }
     }
-    return tb;
-}
-
-static gint gpc_cmp(gconstpointer ap, gconstpointer bp)
-{
-    const TranslationBlock *a = (TranslationBlock *)ap;
-    const TranslationBlock *b = (TranslationBlock *)bp;
-
-    return (a->pc < b->pc) ? -1 : (a->pc > b->pc);
-}
-
-static void tu_tree_insert(TranslationBlock *tb)
-{
-    g_tree_insert(tu_data->tree, tb, tb);
-}
-
-static inline void tu_trees_init(void)
-{
-    tu_data->tree = g_tree_new(gpc_cmp);
+    return NULL;
 }
 
 void tu_control_init(void)
@@ -123,7 +107,6 @@ void tu_control_init(void)
     tu_data->ir1_num_in_tu = 0;
     tu_data->tb_num = 0;
     tu_data->curr_num = 0;
-    tu_trees_init();
 
     return;
 }
@@ -367,7 +350,6 @@ static TranslationBlock* tb_create(CPUState *cpu, uint64_t pc,
         return NULL;
     }    
 
-    tu_tree_insert(tb);
     return tb;
 }
 
@@ -885,7 +867,6 @@ static bool tu_patch_b(uintptr_t fix_addr, uintptr_t target)
     insn |= ((uint32_t)disp & 0xffff) << 10;
     insn |= ((uint32_t)disp >> 16) & 0x3ff;
     qatomic_set(fix_rw, insn);
-    flush_idcache_range(fix_addr, (uintptr_t)fix_rw, 4);
     return true;
 }
 
@@ -910,7 +891,6 @@ static bool tu_patch_as_b(uintptr_t fix_addr, uintptr_t target)
     insn |= ((uint32_t)disp & 0xffff) << 10;
     insn |= ((uint32_t)disp >> 16) & 0x3ff;
     qatomic_set(fix_rw, insn);
-    flush_idcache_range(fix_addr, (uintptr_t)fix_rw, 4);
     return true;
 }
 
@@ -927,7 +907,6 @@ static bool tu_patch_bcc16(uintptr_t fix_addr, uintptr_t target)
     insn &= ~(0xffffu << 10);
     insn |= ((uint32_t)disp & 0xffff) << 10;
     qatomic_set(fix_rw, insn);
-    flush_idcache_range(fix_addr, (uintptr_t)fix_rw, 4);
     return true;
 }
 
@@ -945,7 +924,6 @@ static bool tu_patch_bcc20(uintptr_t fix_addr, uintptr_t target)
     insn |= ((uint32_t)disp & 0xffff) << 10;
     insn |= ((uint32_t)disp >> 16) & 0x1f;
     qatomic_set(fix_rw, insn);
-    flush_idcache_range(fix_addr, (uintptr_t)fix_rw, 4);
     return true;
 }
 
@@ -1713,11 +1691,6 @@ TranslationBlock *tu_gen_code(CPUState *cpu,
     qemu_thread_jit_write();
     tu_scratch_begin();
 
-    /* An abandoned translation (e.g. after a code-cache flush) may leave
-     * stale TranslationBlock pointers in the per-thread lookup tree.  Drop
-     * them before exploring a fresh TU. */
-    tu_trees_reset();
-
     /* 1.Search all TBs in the function */
     entry = tb_explore(cpu, pc, cs_base, flags, cflags);
     /* 2.Translate TU*/
@@ -1734,7 +1707,6 @@ TranslationBlock *tu_gen_code(CPUState *cpu,
     register_tu(tb_list, cpu, cflags);
     print_tu(cpu, tb_list);
     lata_debug_dump_tu(cpu, tb_list, tu_data->tb_num);
-    tu_trees_reset();
     tu_scratch_end();
     return entry;
 }
