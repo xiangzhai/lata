@@ -866,7 +866,7 @@ static void lata_helper_addl_saturate_s64(DisasContext* ctx, IR2_OPND vreg_d, IR
     // li_d(temp, ctx->base->pc_next);
     // la_st_d(temp, env_ir2_opnd, env_offset_pc());
 
-    lata_gen_call_helper_prologue(tcg_ctx);
+    lata_gen_call_helper_prologue_int(tcg_ctx);
 
     li_d(temp, (uint64_t)helper_neon_addl_saturate_s64);
     la_mov64(a0_ir2_opnd, env_ir2_opnd);
@@ -885,7 +885,7 @@ static void lata_helper_addl_saturate_s64(DisasContext* ctx, IR2_OPND vreg_d, IR
     if (rd != -1)
         vector_store_to_env(rd, vreg_d);
 
-    lata_gen_call_helper_epilogue(tcg_ctx);
+    lata_gen_call_helper_epilogue_int(tcg_ctx);
 
     free_alloc_gpr(temp);
 }
@@ -898,7 +898,7 @@ static void lata_helper_addl_saturate_s32(DisasContext* ctx, IR2_OPND vreg_d, IR
     // li_d(temp, ctx->base->pc_next);
     // la_st_d(temp, env_ir2_opnd, env_offset_pc());
 
-    lata_gen_call_helper_prologue(tcg_ctx);
+    lata_gen_call_helper_prologue_int(tcg_ctx);
 
     li_d(temp, (uint64_t)helper_neon_addl_saturate_s32);
     la_mov64(a0_ir2_opnd, env_ir2_opnd);
@@ -930,7 +930,7 @@ static void lata_helper_addl_saturate_s32(DisasContext* ctx, IR2_OPND vreg_d, IR
     if (rd != -1)
         vector_store_to_env(rd, vreg_d);
 
-    lata_gen_call_helper_epilogue(tcg_ctx);
+    lata_gen_call_helper_epilogue_int(tcg_ctx);
     free_alloc_gpr(temp);
 }
 
@@ -2354,7 +2354,7 @@ static bool trans_CRYPTO(DisasContext* s)
             default: lata_unallocated_encoding(s); return true;
         }
         IR2_OPND temp = ra_alloc_itemp();
-        lata_gen_call_helper_prologue(tcg_ctx);
+        lata_gen_call_helper_prologue_int(tcg_ctx);
         if (is_2reg) {
             li_d(temp, env_offset_fpr(rd));
             la_add_d(a0_ir2_opnd, env_ir2_opnd, temp);
@@ -2377,7 +2377,7 @@ static bool trans_CRYPTO(DisasContext* s)
         }
         li_d(temp, (uint64_t)helper_func);
         la_jirl(ra_ir2_opnd, temp, 0);
-        lata_gen_call_helper_epilogue(tcg_ctx);
+        lata_gen_call_helper_epilogue_int(tcg_ctx);
         free_alloc_gpr(temp);
         return true;
     }
@@ -2450,7 +2450,7 @@ static bool trans_CRYPTO(DisasContext* s)
             }
         }
         IR2_OPND temp = ra_alloc_itemp();
-        lata_gen_call_helper_prologue(tcg_ctx);
+        lata_gen_call_helper_prologue_int(tcg_ctx);
         if (is_two_reg) {
             li_d(temp, env_offset_fpr(rd));
             la_add_d(a0_ir2_opnd, env_ir2_opnd, temp);
@@ -2470,7 +2470,7 @@ static bool trans_CRYPTO(DisasContext* s)
         }
         li_d(temp, (uint64_t)helper_func);
         la_jirl(ra_ir2_opnd, temp, 0);
-        lata_gen_call_helper_epilogue(tcg_ctx);
+        lata_gen_call_helper_epilogue_int(tcg_ctx);
         free_alloc_gpr(temp);
         return true;
     }
@@ -2556,7 +2556,7 @@ static bool trans_CRYPTO(DisasContext* s)
             }
             if (!dc_isar_feature(aa64_sm3, s)) goto crypto_undef;
             temp = ra_alloc_itemp();
-            lata_gen_call_helper_prologue(tcg_ctx);
+            lata_gen_call_helper_prologue_int(tcg_ctx);
             li_d(temp, env_offset_fpr(rd));
             la_add_d(a0_ir2_opnd, env_ir2_opnd, temp);
             li_d(temp, env_offset_fpr(rn));
@@ -2567,7 +2567,7 @@ static bool trans_CRYPTO(DisasContext* s)
             la_mov64(a3_ir2_opnd, temp);
             li_d(temp, (uint64_t)tt_func);
             la_jirl(ra_ir2_opnd, temp, 0);
-            lata_gen_call_helper_epilogue(tcg_ctx);
+            lata_gen_call_helper_epilogue_int(tcg_ctx);
             free_alloc_gpr(temp);
             return true;
         }
@@ -2576,10 +2576,10 @@ static bool trans_CRYPTO(DisasContext* s)
         if ((insn & 0xFFFFF000) == 0xCEC08000) {
             int opcode_2r = extract32(insn, 10, 2);
             temp = ra_alloc_itemp();
-            lata_gen_call_helper_prologue(tcg_ctx);
+            lata_gen_call_helper_prologue_int(tcg_ctx);
             if (opcode_2r == 0) {
                 if (!dc_isar_feature(aa64_sha512, s)) {
-                    lata_gen_call_helper_epilogue(tcg_ctx);
+                    lata_gen_call_helper_epilogue_int(tcg_ctx);
                     free_alloc_gpr(temp);
                     goto crypto_undef;
                 }
@@ -2593,7 +2593,7 @@ static bool trans_CRYPTO(DisasContext* s)
                 la_jirl(ra_ir2_opnd, temp, 0);
             } else if (opcode_2r == 1) {
                 if (!dc_isar_feature(aa64_sm4, s)) {
-                    lata_gen_call_helper_epilogue(tcg_ctx);
+                    lata_gen_call_helper_epilogue_int(tcg_ctx);
                     free_alloc_gpr(temp);
                     goto crypto_undef;
                 }
@@ -2607,11 +2607,11 @@ static bool trans_CRYPTO(DisasContext* s)
                 li_d(temp, (uint64_t)helper_crypto_sm4e);
                 la_jirl(ra_ir2_opnd, temp, 0);
             } else {
-                lata_gen_call_helper_epilogue(tcg_ctx);
+                lata_gen_call_helper_epilogue_int(tcg_ctx);
                 free_alloc_gpr(temp);
                 goto crypto_undef;
             }
-            lata_gen_call_helper_epilogue(tcg_ctx);
+            lata_gen_call_helper_epilogue_int(tcg_ctx);
             free_alloc_gpr(temp);
             return true;
         }
@@ -2661,7 +2661,7 @@ static bool trans_CRYPTO(DisasContext* s)
                 }
             }
             temp = ra_alloc_itemp();
-            lata_gen_call_helper_prologue(tcg_ctx);
+            lata_gen_call_helper_prologue_int(tcg_ctx);
             li_d(temp, env_offset_fpr(rd));
             la_add_d(a0_ir2_opnd, env_ir2_opnd, temp);
             li_d(temp, env_offset_fpr(rn));
@@ -2672,7 +2672,7 @@ static bool trans_CRYPTO(DisasContext* s)
             la_mov64(a3_ir2_opnd, temp);
             li_d(temp, (uint64_t)func3);
             la_jirl(ra_ir2_opnd, temp, 0);
-            lata_gen_call_helper_epilogue(tcg_ctx);
+            lata_gen_call_helper_epilogue_int(tcg_ctx);
             free_alloc_gpr(temp);
             return true;
         }
@@ -2945,7 +2945,7 @@ static void lata_helper_dc_zva(DisasContext* s, int rt)
     IR2_OPND temp = ra_alloc_itemp();
     li_d(temp, s->base->pc_next);
     la_st_d(temp, env_ir2_opnd, env_offset_pc());
-    lata_gen_call_helper_prologue(tcg_ctx);
+    lata_gen_call_helper_prologue_int(tcg_ctx);
 
     if (s->mte_active[0]) {
         lata_unallocated_encoding(s);
@@ -2960,7 +2960,7 @@ static void lata_helper_dc_zva(DisasContext* s, int rt)
     li_d(temp, (uint64_t)helper_dc_zva);
     la_jirl(ra_ir2_opnd, temp, 0);
 
-    lata_gen_call_helper_epilogue(tcg_ctx);
+    lata_gen_call_helper_epilogue_int(tcg_ctx);
     free_alloc_gpr(temp);
     return;
 }
@@ -3499,7 +3499,7 @@ static void lata_store_exclusive(DisasContext* s, int rs, int rt, int rt2,
              * Two 64-bit SC.D cannot store 16 bytes atomically. */
             IR2_OPND helper = ra_alloc_itemp();
 
-            lata_gen_call_helper_prologue(tcg_ctx);
+            lata_gen_call_helper_prologue_int(tcg_ctx);
             la_mov64(a0_ir2_opnd, env_ir2_opnd);
             la_ld_d(a1_ir2_opnd, env_ir2_opnd, env_offset_gpr(rn));
             lata_confine_guest_addr(a1_ir2_opnd, a1_ir2_opnd);
@@ -3531,7 +3531,7 @@ static void lata_store_exclusive(DisasContext* s, int rs, int rt, int rt2,
             li_d(helper, (uint64_t)lata_stxp_pair);
             la_jirl(ra_ir2_opnd, helper, 0);
             la_st_d(a0_ir2_opnd, env_ir2_opnd, env_offset(exclusive_memdata));
-            lata_gen_call_helper_epilogue(tcg_ctx);
+            lata_gen_call_helper_epilogue_int(tcg_ctx);
 
             la_ld_d(reg_s, env_ir2_opnd, env_offset(exclusive_memdata));
             free_alloc_gpr(helper);
@@ -5473,7 +5473,7 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
         IR2_OPND helper;
         IR2_OPND dst;
 
-        lata_gen_call_helper_prologue(tcg_ctx);
+        lata_gen_call_helper_prologue_int(tcg_ctx);
         la_ld_d(a0_ir2_opnd, env_ir2_opnd, env_offset_gpr(a->rn));
         lata_confine_guest_addr(a0_ir2_opnd, a0_ir2_opnd);
         if (a->rs == 31) {
@@ -5494,7 +5494,7 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
             la_dbar(0);
         }
         la_st_d(a0_ir2_opnd, env_ir2_opnd, env_offset(exclusive_memdata));
-        lata_gen_call_helper_epilogue(tcg_ctx);
+        lata_gen_call_helper_epilogue_int(tcg_ctx);
 
         if (a->rt != 31) {
             if (arm_la_map[a->rt] >= 0) {
@@ -10954,7 +10954,7 @@ static void disas_simd_tb(DisasContext* s, uint32_t insn)
     li_d(temp, s->base->pc_next);
     la_st_d(temp, env_ir2_opnd, env_offset_pc());
 
-    lata_gen_call_helper_prologue(tcg_ctx);
+    lata_gen_call_helper_prologue_int(tcg_ctx);
     /* void HELPER(simd_tblx)(void *vd, void *vm, void *venv, uint32_t desc) */
     la_mov64(a2_ir2_opnd, env_ir2_opnd);
     li_d(a0_ir2_opnd, vec_full_reg_offset(s, rd));
@@ -10964,7 +10964,7 @@ static void disas_simd_tb(DisasContext* s, uint32_t insn)
     li_d(a3_ir2_opnd, simd_desc(is_q ? 16 : 8, vec_full_reg_size(s), (len << 6) | (is_tbx << 5) | rn));
     li_d(temp, (int64_t)helper_simd_tblx);
     la_jirl(ra_ir2_opnd, temp, 0);
-    lata_gen_call_helper_epilogue(tcg_ctx);
+    lata_gen_call_helper_epilogue_int(tcg_ctx);
 
     free_alloc_gpr(temp);
 }
@@ -22498,11 +22498,98 @@ skip_decode:
     set_base_isjump(s);
 }
 
+/*
+ * Fuse an adjacent MOVZ/MOVN + MOVK... sequence writing the same register
+ * into a single constant materialisation.  Compilers emit these runs to
+ * build 64-bit constants; translating each instruction separately reloads
+ * and rewrites the destination between every chunk.
+ */
+static bool lata_fuse_wide_move(DisasContext *s, int count, int *consumed,
+                                uint64_t *value, int *rd, bool *sf)
+{
+    arg_movw *first;
+    uint64_t val;
+    int n;
+
+    if (count < 2 ||
+        (s->insn_type != AARCH64_A64_MOVZ &&
+         s->insn_type != AARCH64_A64_MOVN)) {
+        return false;
+    }
+
+    first = &s->arg.f_movw;
+    val = (uint64_t)(uint32_t)first->imm << (first->hw * 16);
+    if (s->insn_type == AARCH64_A64_MOVN) {
+        val = ~val;
+    }
+    if (!first->sf) {
+        val &= 0xffffffffull;
+    }
+
+    for (n = 1; n < count; n++) {
+        DisasContext *next = s + n;
+        arg_movw *a;
+        uint64_t mask;
+
+        if (next->insn_type != AARCH64_A64_MOVK) {
+            break;
+        }
+        a = &next->arg.f_movw;
+        if (a->rd != first->rd || a->sf != first->sf) {
+            break;
+        }
+        mask = (uint64_t)0xffff << (a->hw * 16);
+        val = (val & ~mask) |
+              (((uint64_t)(uint32_t)a->imm << (a->hw * 16)) & mask);
+        if (!first->sf) {
+            val &= 0xffffffffull;
+        }
+    }
+
+    if (n < 2) {
+        return false;
+    }
+
+    *consumed = n;
+    *value = val;
+    *rd = first->rd;
+    *sf = first->sf;
+    return true;
+}
+
+static void lata_emit_fused_wide_move(int rd, bool sf, uint64_t value)
+{
+    IR2_OPND reg_d;
+
+    if (rd == 31) {
+        return;
+    }
+
+    reg_d = alloc_gpr_dst(rd);
+    if (value == 0) {
+        store_gpr_zero(rd);
+    } else {
+        if (value <= 0xfff) {
+            la_ori(reg_d, zero_ir2_opnd, value);
+        } else {
+            li_d(reg_d, value);
+        }
+        if (arm_la_map[rd] >= 0 && clearGprHigh) {
+            set_w_write_flag(rd, sf);
+        } else if (!sf) {
+            la_bstrpick_d(reg_d, reg_d, 31, 0);
+        }
+        store_gpr_dst(rd, reg_d);
+    }
+    free_alloc_gpr(reg_d);
+}
+
 /*ir1 -> ir2*/
 bool tr_ir2_generate(struct TranslationBlock* tb)
 {
     int i;
     int last_is_jmp = DISAS_NEXT;
+    int fused_until = -1;
 
     int ir1_nr = tb->icount;
     DisasContext* pir1 = (DisasContext*)tb->ir1;
@@ -22532,6 +22619,35 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
         tu_base.is_jmp = DISAS_NEXT;
         pir1->base = &tu_base;
 #endif
+        if (i <= fused_until) {
+            /* Tail of a fused MOVZ/MOVN+MOVK sequence: the code was already
+             * emitted with the start instruction, but keep per-IR1
+             * bookkeeping in sync. */
+            last_is_jmp = DISAS_NEXT;
+            lata_gpr_cache_end_insn();
+            lata_df_advance_insn();
+#ifndef CONFIG_LATA_TU
+            tcg_ctx->gen_insn_end_off[i] =
+                (lsenv->tr_data->real_ir2_inst_num) << 2;
+            tcg_ctx->gen_insn_data[i * TARGET_INSN_START_WORDS] = pir1->pc_curr;
+#endif
+            pir1++;
+            continue;
+        }
+
+        int fuse_count = 0;
+        uint64_t fuse_value = 0;
+        int fuse_rd = 0;
+        bool fuse_sf = false;
+        bool fused_here = false;
+
+        if (i + 1 < ir1_nr &&
+            lata_fuse_wide_move(pir1, ir1_nr - i, &fuse_count, &fuse_value,
+                                &fuse_rd, &fuse_sf)) {
+            lata_emit_fused_wide_move(fuse_rd, fuse_sf, fuse_value);
+            fused_until = i + fuse_count - 1;
+            fused_here = true;
+        } else {
 #ifdef CONFIG_LATA_INSTS_PATTERN
         /*Only check if the last two elements are CMP+B.COND*/
         if (i == ir1_nr - 2 && insts_pattern(pir1, pir1 + 1)) {
@@ -22558,7 +22674,8 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
         if (pir1->btype > 0 && pir1->base->is_jmp != DISAS_NORETURN) {
             lata_reset_btype(pir1);
         }
-        last_is_jmp = pir1->base->is_jmp;
+        }
+        last_is_jmp = fused_here ? DISAS_NEXT : pir1->base->is_jmp;
         lata_gpr_cache_end_insn();
         lata_df_advance_insn();
 #ifndef CONFIG_LATA_TU

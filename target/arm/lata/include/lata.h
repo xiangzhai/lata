@@ -141,6 +141,13 @@ void lata_gen_call_helper_prologue(TCGContext *tcg_ctx);
 void lata_gen_call_helper_epilogue(TCGContext *tcg_ctx);
 void lata_gen_call_helper_prologue_no_flags(TCGContext *tcg_ctx);
 void lata_gen_call_helper_epilogue_no_flags(TCGContext *tcg_ctx);
+/*
+ * Variant for helpers that never touch guest FP state.  It keeps the full
+ * GPR/FPR/PSTATE save/restore but skips the FCSR rounding and FP-exception
+ * flag merge, matching latx's use_fp==0 helper path.
+ */
+void lata_gen_call_helper_prologue_int(TCGContext *tcg_ctx);
+void lata_gen_call_helper_epilogue_int(TCGContext *tcg_ctx);
 
 IR2_OPND alloc_gpr_src(int i);
 IR2_OPND alloc_gpr_src_sp(int i);

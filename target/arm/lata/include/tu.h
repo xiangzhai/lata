@@ -36,6 +36,9 @@ void tu_control_init(void);
 TranslationBlock *tu_gen_code(CPUState *cpu, uint64_t pc,
                               uint64_t cs_base, uint32_t flags,
                               int cflags);
+/* Per-thread work that does not need mmap_lock, run after the lock is
+ * dropped so debug dumps and scratch teardown stay off the critical path. */
+void tu_gen_code_post(CPUState *cpu);
 void tu_aarch64_optimization(struct TranslationBlock *tb);
 int translate_tb_in_tu(struct TranslationBlock *tb);
 void lata_pre_translate(void** list, int num, CPUState *cpu,

@@ -105,9 +105,9 @@ static void tu_scratch_begin(void)
     tu_scratch.ir1_used = 0;
 }
 
+/* Called after mmap_unlock() from tu_gen_code_post(); only per-thread state. */
 static void tu_scratch_end(void)
 {
-    assert_memory_lock();
     tu_scratch.ir1_used = 0;
     tu_scratch.in_use = false;
 }
@@ -1754,10 +1754,21 @@ TranslationBlock *tu_gen_code(CPUState *cpu,
     }
     /* 3.Insert TBs in TU to QHT */
     register_tu(tb_list, cpu, cflags);
+    return entry;
+}
+
+/*
+ * Debug dumps and scratch teardown only touch per-thread state.  Run them
+ * after the caller drops mmap_lock so they do not extend the critical
+ * section that serialises concurrent translators.
+ */
+void tu_gen_code_post(CPUState *cpu)
+{
+    TranslationBlock **tb_list = tu_data->tb_list;
+
     print_tu(cpu, tb_list);
     lata_debug_dump_tu(cpu, tb_list, tu_data->tb_num);
     lata_df_scratch_end();
     tu_scratch_end();
-    return entry;
 }
 #endif

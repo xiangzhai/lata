@@ -1154,6 +1154,80 @@ void lata_gen_call_helper_epilogue_no_flags(TCGContext *tcg_ctx)
     }
 }
 
+static void lata_gen_save_mapped_gprs(void)
+{
+    for (int i = 0; i <= 31; ++i) {
+        if (arm_la_map[i] > 0) {
+            la_st_d(ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]),
+                    env_ir2_opnd, env_offset_gpr(i));
+        }
+    }
+}
+
+static void lata_gen_load_mapped_gprs(void)
+{
+    for (int i = 0; i <= 31; ++i) {
+        if (arm_la_map[i] > 0) {
+            la_ld_d(ir2_opnd_new(IR2_OPND_GPR, arm_la_map[i]),
+                    env_ir2_opnd, env_offset_gpr(i));
+        }
+    }
+}
+
+static void lata_gen_save_mapped_fprs(void)
+{
+    for (int i = 0; i <= 31; ++i) {
+        if (arm_la_fmap[i] >= 0) {
+            la_vst(ir2_opnd_new(IR2_OPND_FPR, arm_la_fmap[i]), env_ir2_opnd,
+                   env_offset_fpr(i));
+        }
+    }
+}
+
+static void lata_gen_load_mapped_fprs(void)
+{
+    for (int i = 0; i <= 31; ++i) {
+        if (arm_la_fmap[i] >= 0) {
+            la_vld(ir2_opnd_new(IR2_OPND_FPR, arm_la_fmap[i]), env_ir2_opnd,
+                   env_offset_fpr(i));
+        }
+    }
+}
+
+static void lata_gen_store_pstate(void)
+{
+    la_armmfflag(t0_ir2_opnd, 0x39);
+    la_st_w(t0_ir2_opnd, env_ir2_opnd, env_offset_PSTATE());
+}
+
+static void lata_gen_load_pstate(void)
+{
+    la_ld_w(a7_ir2_opnd, env_ir2_opnd, env_offset_PSTATE());
+    la_armmtflag(a7_ir2_opnd, 0x39);
+}
+
+/*
+ * Integer helper: full GPR/FPR spill so any signal or exception sees a
+ * complete guest state, but no FCSR rounding setup and no FP-exception flag
+ * merge.  Integer helpers cannot observe guest FP state.
+ */
+void lata_gen_call_helper_prologue_int(TCGContext *tcg_ctx)
+{
+    lata_df_mark_helper_boundary();
+    lata_flush_writes_before_helper();
+    lata_vec_materialize_all_dirty();
+    lata_gen_save_mapped_fprs();
+    lata_gen_save_mapped_gprs();
+    lata_gen_store_pstate();
+}
+
+void lata_gen_call_helper_epilogue_int(TCGContext *tcg_ctx)
+{
+    lata_gen_load_pstate();
+    lata_gen_load_mapped_fprs();
+    lata_gen_load_mapped_gprs();
+}
+
 static inline uint32_t lata_fam_hash(uint64_t pc)
 {
     return (pc ^ (pc >> TB_JMP_CACHE_BITS)) & (TB_JMP_CACHE_SIZE - 1);

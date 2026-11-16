@@ -636,10 +636,12 @@ void cpu_exec_step_atomic(CPUState *cpu)
             mmap_lock();
 #ifdef CONFIG_LATA_TU
             tb = tu_gen_code(cpu, pc, cs_base, flags, cflags);
+            mmap_unlock();
+            tu_gen_code_post(cpu);
 #else
             tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
-#endif
             mmap_unlock();
+#endif
         }
 
         cpu_exec_enter(cpu);
@@ -1105,10 +1107,12 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 mmap_lock();
 #ifdef CONFIG_LATA_TU
                 tb = tu_gen_code(cpu, pc, cs_base, flags, cflags);
+                mmap_unlock();
+                tu_gen_code_post(cpu);
 #else
                 tb = tb_gen_code(cpu, pc, cs_base, flags, cflags);
-#endif
                 mmap_unlock();
+#endif
 
                 /*
                  * We add the TB in the virtual pc hash table
