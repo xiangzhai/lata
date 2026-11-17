@@ -14,6 +14,7 @@ check-help:
 	@echo " $(MAKE) check-block            Run block tests"
 ifneq ($(filter $(all-check-targets), check-softfloat),)
 	@echo " $(MAKE) check-tcg              Run TCG tests"
+	@echo " $(MAKE) check-lata-apps        Run codex/claude AArch64 smoke gate (external binaries)"
 	@echo " $(MAKE) check-softfloat        Run FPU emulation tests"
 endif
 	@echo " $(MAKE) check-avocado          Run avocado (integration) tests for currently configured targets"
@@ -81,6 +82,27 @@ clean-tcg: $(CLEAN_TCG_TARGET_RULES)
 
 .PHONY: distclean-tcg
 distclean-tcg: $(DISTCLEAN_TCG_TARGET_RULES)
+
+# Real-application smoke gate.  These binaries and the AArch64 sysroot are
+# external, so the target skips unless LATA_APP_GATE_REQUIRE=1 is set.
+LATA_SYSROOT ?= $(HOME)/linux-aarch64
+LATA_CODEX ?= $(HOME)/codex-aarch64-unknown-linux-musl
+LATA_CLAUDE ?= $(HOME)/linux-aarch64/bin/claude
+
+.PHONY: check-lata-apps
+check-lata-apps:
+	$(call quiet-command, \
+	    $(PYTHON) $(SRC_PATH)/scripts/ci/lata-app-gate.py \
+	        --qemu $(BUILD_DIR)/lata-aarch64 \
+	        --sysroot "$(LATA_SYSROOT)" \
+	        --codex "$(LATA_CODEX)" \
+	        --claude "$(LATA_CLAUDE)", \
+	    "GATE", "LATA codex/claude")
+
+# Opt-in CI gate: set LATA_APP_GATE=1 to make "make check" enforce it.
+ifeq ($(LATA_APP_GATE),1)
+check: check-lata-apps
+endif
 
 # Python venv for running tests
 
