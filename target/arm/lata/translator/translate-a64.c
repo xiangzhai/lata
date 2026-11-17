@@ -8092,6 +8092,22 @@ static void disas_data_proc_1src(DisasContext* s, uint32_t insn)
         case MAP(1, 0x01, 0x05): /* AUTIB */
         case MAP(1, 0x01, 0x06): /* AUTDA */
         case MAP(1, 0x01, 0x07): /* AUTDB */
+        {
+            /*
+             * Darling's arm64 runtime uses PAC instructions to sign and
+             * authenticate return addresses.  It disables PAC for arm64e
+             * guests through the kernel interface, but plain arm64 code
+             * (libdyld, libsystem_kernel, ...) still executes XPACI/XPACD and
+             * the two-register PAC/AUT forms.  LATA does not model pointer
+             * signing, so treat them as identity moves (XPAC) and no-ops
+             * (PAC/AUT), matching a CPU with pointer authentication absent.
+             */
+            IR2_OPND reg_d = alloc_gpr_dst(rd);
+            IR2_OPND reg_n = alloc_gpr_src_ro(rn);
+            la_mov64(reg_d, reg_n);
+            store_gpr_dst(rd, reg_d);
+            break;
+        }
         case MAP(1, 0x01, 0x08): /* PACIZA */
         case MAP(1, 0x01, 0x09): /* PACIZB */
         case MAP(1, 0x01, 0x0a): /* PACDZA */
@@ -8102,8 +8118,11 @@ static void disas_data_proc_1src(DisasContext* s, uint32_t insn)
         case MAP(1, 0x01, 0x0f): /* AUTDZB */
         case MAP(1, 0x01, 0x10): /* XPACI */
         case MAP(1, 0x01, 0x11): /* XPACD */
-            lata_unallocated_encoding(s);
-            return;
+            /*
+             * In-place forms: their source is Rd itself (the Rn field is
+             * XZR for XPACI/XPACD).  Without pointer signing both strip and
+             * sign are identity operations, so leave Rd unchanged.
+             */
             break;
         default:
             lata_unallocated_encoding(s);
