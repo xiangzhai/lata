@@ -675,6 +675,16 @@ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr)
     uintptr_t jmp_rx = (uintptr_t)tb->tc.ptr + offset;
     uintptr_t jmp_rw = jmp_rx - tcg_splitwx_diff;
 
+    /*
+     * TU edges are emitted directly and never initialize the generic
+     * goto_tb patch slot.  They must be linked through the TU edge path;
+     * if that fell back there is nothing to patch here and the original
+     * unlink stub already returns to the C loop.
+     */
+    if (offset == TB_JMP_OFFSET_INVALID) {
+        return;
+    }
+
     tb->jmp_target_addr[n] = addr;
 #ifdef CONFIG_LATA
     if (tb->jmp_reset_offset[n] != TB_JMP_OFFSET_INVALID) {
@@ -689,7 +699,15 @@ void tb_set_jmp_target(TranslationBlock *tb, int n, uintptr_t addr)
             uintptr_t slot = (uintptr_t)&tb->jmp_target_addr[n];
             intptr_t slot_disp = ((intptr_t)slot - (intptr_t)jmp_rx) >> 2;
 
-            g_assert(slot_disp >= -(1 << 19) && slot_disp < (1 << 19));
+            /*
+             * The indirect form needs both the target address slot and
+             * the patch site inside the same pc-relative window.  Code
+             * cache and TB metadata can drift apart after a long run;
+             * leave the original exit path in place instead of aborting.
+             */
+            if (slot_disp < -(1 << 19) || slot_disp >= (1 << 19)) {
+                return;
+            }
             insn = 0x18000000;
             insn |= 4; /* a0, reserved by LATA goto_tb stubs */
             insn |= ((uint32_t)slot_disp & 0xfffff) << 5;

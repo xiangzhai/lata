@@ -219,6 +219,36 @@ void lata_gen_a64_update_pc(DisasContext* s, target_long diff)
     lata_gen_a64_update_pc_value(dest);
 }
 
+/*
+ * Chained TBs and TU-internal edges jump directly into the next TB's
+ * generated code, bypassing cpu_exec_loop().  Without a check at the TB
+ * entry a tight guest loop can run forever and never observe cpu_exit().
+ * In particular start_exclusive() (used by fork) then waits forever for
+ * that vCPU, which deadlocks multi-threaded guests.  Mirror the upstream
+ * gen_tb_start(): load the exit-request word and leave through the normal
+ * epilogue so the C loop can handle the request.
+ */
+static void lata_gen_tb_exit_request_check(TranslationBlock *tb)
+{
+    IR2_OPND no_exit = ir2_opnd_new_type(IR2_OPND_LABEL);
+    IR2_OPND ir2_opnd_addr;
+    int64_t curr_ins_pos, exit_offset;
+
+    la_ld_w(t0_ir2_opnd, env_ir2_opnd, env_offset_exit_request());
+    la_bge(t0_ir2_opnd, zero_ir2_opnd, no_exit);
+
+    /* The request will be handled in C, which needs the current guest PC. */
+    lata_gen_a64_update_pc_value(tb->pc);
+
+    curr_ins_pos = (unsigned long)tb->tc.ptr +
+        (lsenv->tr_data->real_ir2_inst_num << 2);
+    exit_offset = context_switch_native_to_bt_ret_0 - curr_ins_pos;
+    ir2_opnd_build(&ir2_opnd_addr, IR2_OPND_IMM, exit_offset >> 2);
+    la_b(ir2_opnd_addr);
+
+    la_label(no_exit);
+}
+
 static void lata_gen_exception_with_syndrome(DisasContext *s, uint32_t excp,
                                              uint32_t syndrome)
 {
@@ -22598,6 +22628,11 @@ bool tr_ir2_generate(struct TranslationBlock* tb)
 #endif
     lata_df_begin_translate(tb);
     lata_vec_dirty_reset();
+
+    if (!(tb->cflags & CF_NOIRQ)) {
+        lata_gen_tb_exit_request_check(tb);
+    }
+
     for (i = 0; i < ir1_nr; ++i) {
         /*
          * ir1_nr lives in a callee-saved register across the translate call.

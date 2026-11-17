@@ -9,9 +9,15 @@ AARCH64_SRC=$(SRC_PATH)/tests/tcg/aarch64
 VPATH 		+= $(AARCH64_SRC)
 
 # Base architecture tests
-AARCH64_TESTS=fcvt pcalign-a64 lse2-fault lata-flags lata-movwide
+AARCH64_TESTS=fcvt pcalign-a64 lse2-fault lata-flags lata-movwide lata-forkexit lata-tu-overlap
 
 fcvt: LDFLAGS+=-lm
+
+lata-forkexit: CFLAGS+=-pthread
+lata-forkexit: LDFLAGS+=-pthread
+
+lata-tu-overlap: CFLAGS+=-pthread
+lata-tu-overlap: LDFLAGS+=-pthread
 
 run-fcvt: fcvt
 	$(call run-test,$<,$(QEMU) $<, "$< on $(TARGET_NAME)")

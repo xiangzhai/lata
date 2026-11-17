@@ -351,6 +351,8 @@ static void tu_reset_tb(TranslationBlock *tb)
     /* init top in and top out */
     tb->jmp_reset_offset[0] = TB_JMP_OFFSET_INVALID;
     tb->jmp_reset_offset[1] = TB_JMP_OFFSET_INVALID;
+    tb->jmp_insn_offset[0] = TB_JMP_OFFSET_INVALID;
+    tb->jmp_insn_offset[1] = TB_JMP_OFFSET_INVALID;
     tb_set_page_addr0(tb, -1);
     tb_set_page_addr1(tb, -1);
 #ifdef CONFIG_LATA_INSTS_PATTERN
@@ -594,142 +596,21 @@ static inline void get_tu_queue(CPUState *cpu,
     }
 }
 
-static void tu_set_tb_to_translate_context(TranslationBlock *tb,
-                                           LataTUFallbackReason reason)
-{
-    lata_tu_drop_all_edges(tb, reason);
-    tb->s_data->tu_tb_mode = TU_TB_MODE_SWITCH_TO_TB;
-    lata_tu_tb_reset_edges(tb);
-    lata_tu_mark_tb_fallback(tb, reason);
-}
-
-static void lata_tu_recompute_tail_info(TranslationBlock *tb)
-{
-    DisasContext *last_ir1;
-
-    if (!tb->ir1 || tb->icount == 0) {
-        tu_set_tb_to_translate_context(tb,
-                                       LATA_TU_FALLBACK_INVALID_TARGET);
-        return;
-    }
-
-    last_ir1 = (DisasContext *)tb->ir1 + tb->icount - 1;
-    tb->next_pc = last_ir1->pc_curr + 4;
-    tb->target_pc = 0;
-    tb->last_ir1_type = IR1_TYPE_NORMAL;
-    get_last_info(tb, last_ir1);
-    tb->size = tb->next_pc - tb->pc;
-}
-
-static void tu_split_tb(TranslationBlock *pre_tb, TranslationBlock *tb)
-{
-    bool spilt_success = false;
-    DisasContext *pre_s = (DisasContext *)pre_tb->ir1;
-    uint32_t split_icount = 0;
-    target_ulong pre_pc, tb_pc = ((DisasContext *)tb->ir1)->pc_curr;
-
-    if (pre_tb->icount < tb->icount) {
-        for (int i = 0; i < pre_tb->icount; i++) {
-            pre_pc = (pre_s + i)->pc_curr;
-            if (pre_pc == tb_pc) {
-                spilt_success = true;
-                split_icount = i;
-                break;
-            }
-        }
-    } else if (pre_tb->icount > tb->icount) {
-        uint32_t th_firs_inst = pre_tb->icount - tb->icount;
-        lsassert(th_firs_inst <= pre_tb->icount);
-        pre_pc = (pre_s + th_firs_inst)->pc_curr;
-        if (pre_pc == tb_pc) {
-            spilt_success = true;
-            split_icount = th_firs_inst;
-        }
-    } else {
-        lsassert(0);
-    }
-
-    if (spilt_success) {
-        /* tb->tu_start_mode = TU_TB_START_NORMAL; */
-        lsassert(split_icount > 0 && split_icount < pre_tb->icount);
-        pre_tb->icount = split_icount;
-        lata_tu_recompute_tail_info(pre_tb);
-        pre_tb->next_tb[TU_TB_INDEX_NEXT] = tb;
-        pre_tb->next_tb[TU_TB_INDEX_TARGET] = NULL;
-        lata_tu_tb_reset_edges(pre_tb);
-        lata_tu_edge_set_target(pre_tb, TU_TB_INDEX_NEXT, tb);
-        pre_tb->isplit = 1;
-    } else {
-        /*Can't judge pre_tb or tb was broken.*/
-        tu_set_tb_to_translate_context(pre_tb,
-                                       LATA_TU_FALLBACK_OVERLAP_SPLIT_FAILED);
-        tu_set_tb_to_translate_context(tb,
-                                       LATA_TU_FALLBACK_OVERLAP_SPLIT_FAILED);
-    }
-}
-
+/*
+ * TBs discovered through different BFS paths may overlap.  Each one is still
+ * a valid, independently translated block, so keep them all instead of
+ * splitting and retranslating the earlier TB.  Splitting changes tb->icount
+ * and the tail IR1 after dataflow has already consumed the original block;
+ * the resulting stale tail produced bad code for multi-threaded guests.
+ * tu_sanitize_edges() drops any intra-TU edge whose target does not match
+ * the TB's own next/target PC, which is all that is needed here.
+ */
 void solve_tb_overlap(TranslationBlock **tb_list, int max_insns)
 {
-    TranslationBlock *pre_tb = tb_list[0];
-    TranslationBlock *tb;
-    uint32_t tb_num_in_tu = tu_data->tb_num;
-    for (int i = 1; i < tb_num_in_tu; i++) {
-        tb = tb_list[i];
-        tb->isplit = 0;
-        if (pre_tb->s_data->tu_tb_mode == TU_TB_MODE_BROKEN) {
-            assert(0);
-            pre_tb = tb;
-            continue;
-        }
-        /* judge if TB need split
-         * pre_tb-------->pc + 0
-         *                pc + 1
-         *                pc + 2
-         * tb------------>pc + 3
-         *                pc + 4
-         *                pc + 5
-         * pre_tb_next--->pc + 6
-         */
-        if (tb->pc < pre_tb->next_pc && tb->pc > pre_tb->pc) {
-            /* when split prefix ins, translate it two times.
-             *
-             * pre_tb--------> lock
-             * tb------------> add
-             *                 ...
-             * tb_end--------> jmp
-             *
-             */
-            if (pre_tb->icount == tb->icount) {
-                /* pre_tb dont link in TU */
-                lata_tu_drop_all_edges(pre_tb, LATA_TU_FALLBACK_OVERLAP_PREFIX);
-                lata_tu_tb_reset_edges(pre_tb);
-                pre_tb->s_data->tu_tb_mode = TU_TB_MODE_SWITCH_TO_TB;
-                pre_tb = tb;
-                continue;
-            }
-            if (pre_tb->icount < tb->icount) {
-                /*Can't judge pre_tb or tb was broken.*/
-                tu_set_tb_to_translate_context(pre_tb,
-                                               LATA_TU_FALLBACK_OVERLAP_PREFIX);
-                tu_set_tb_to_translate_context(tb,
-                                               LATA_TU_FALLBACK_OVERLAP_PREFIX);
-                pre_tb = tb;
-                continue;
-            }
-            /*if pre_tb is splited, unlink pre_tb in tu */
-            lata_tu_drop_all_edges(pre_tb, LATA_TU_FALLBACK_OVERLAP_PREFIX);
+    (void)max_insns;
 
-            /*When pre_tb->icount achive max_insns, the end addresses of two TBS are different*/
-            if (pre_tb->icount == max_insns) {
-                lata_tu_tb_reset_edges(pre_tb);
-            } else {
-                tu_split_tb(pre_tb, tb);
-            }
-            /* Note: some message of pre_tb last ir1 ins is not modify */
-        }
-        if (pre_tb->s_data->tu_tb_mode != TU_TB_MODE_BROKEN) {
-            pre_tb = tb;
-        }
+    for (uint32_t i = 0; i < tu_data->tb_num; i++) {
+        tb_list[i]->isplit = 0;
     }
 }
 

@@ -13,6 +13,17 @@ static inline int env_offset_pc(void)
     return offsetof(CPUARMState,pc);
 }
 
+/*
+ * The exit-request/icount decrementer lives in CPUNegativeOffsetState,
+ * which sits immediately before CPUARMState inside ArchCPU.  LATA hands
+ * generated code a CPUARMState pointer, so the offset is negative.
+ */
+static inline int env_offset_exit_request(void)
+{
+    return (int)((intptr_t)offsetof(ArchCPU, neg.icount_decr.u32) -
+                 (intptr_t)offsetof(ArchCPU, env));
+}
+
 static inline int env_offset_fpr(int num)
 {
     return offsetof(CPUARMState,vfp.zregs[num]);
