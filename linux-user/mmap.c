@@ -352,6 +352,14 @@ abi_ulong mmap_find_vma(abi_ulong start, abi_ulong size, abi_ulong align)
         start = mmap_next_start;
     } else {
         start &= qemu_host_page_mask;
+        /*
+         * A hint below mmap_min_addr cannot be mapped by the host.  Linux
+         * treats the address as a hint and ignores it in this case, so do
+         * the same instead of failing the allocation.
+         */
+        if (start < mmap_min_addr) {
+            start = mmap_min_addr;
+        }
     }
     start = ROUND_UP(start, align);
 

@@ -4078,22 +4078,26 @@ static bool trans_LD_lit(DisasContext* s)
     IR2_OPND reg_d = alloc_gpr_dst(a->rt);
     MemOp memop = a->sz + a->sign * MO_SIGN;
     uint64_t addr = s->pc_curr + a->imm;
+
+    /*
+     * The literal may live anywhere in the 64-bit guest address space, so
+     * materialize the full address instead of assuming it fits in 32 bits.
+     */
+    li_d(reg_d, addr);
     switch (memop) {
         case MO_64:
-            // ld_d只能处理si12
-            la_lu12i_w(reg_d, addr >> 12);
-            if (addr & 0x800) {
-                la_ori(reg_d, reg_d, addr & 0xfff);
-                la_ld_d(reg_d, reg_d, 0);
-            } else {
-                la_ld_d(reg_d, reg_d, addr & 0x7ff);
-            }
-
+            la_ld_d(reg_d, reg_d, 0);
+            break;
+        case MO_32:
+            la_ld_wu(reg_d, reg_d, 0);
+            break;
+        case MO_32 | MO_SIGN:
+            la_ld_w(reg_d, reg_d, 0);
             break;
         default:
             lata_unallocated_encoding(s);
+            free_alloc_gpr(reg_d);
             return true;
-            break;
     }
 
     if (arm_la_map[a->rt] >= 0 && a->rt != 31 && clearGprHigh) {
@@ -5543,7 +5547,15 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
     }
 
     IR2_OPND reg_s = alloc_gpr_src(a->rs);
-    IR2_OPND reg_t = a->rt == 31 ? ra_alloc_itemp() : alloc_gpr_dst(a->rt);
+    /*
+     * LoongArch AMO instructions require rd to differ from rk and rj.
+     * AArch64 LSE instructions allow the destination register to equal the
+     * base register (e.g. "ldset x0, x1, [x0]"), so use a temporary for the
+     * AMO result whenever that would alias the base.
+     */
+    bool amo_dst_alias = (a->rt != 31 && a->rt == a->rn);
+    IR2_OPND reg_t = (a->rt == 31 || amo_dst_alias)
+        ? ra_alloc_itemp() : alloc_gpr_dst(a->rt);
     IR2_OPND reg_n = alloc_gpr_src_sp(a->rn);
     IR2_OPND src = ra_alloc_itemp();
 
@@ -5592,7 +5604,12 @@ static bool do_lse_atomic(DisasContext* s, LATALseAtomicOp op)
         la_dbar(0);
     }
     if (a->rt != 31) {
-        store_gpr_dst(a->rt, reg_t);
+        if (amo_dst_alias && arm_la_map[a->rt] >= 0) {
+            IR2_OPND dst = ir2_opnd_new(IR2_OPND_GPR, arm_la_map[a->rt]);
+            la_or(dst, reg_t, zero_ir2_opnd);
+        } else {
+            store_gpr_dst(a->rt, reg_t);
+        }
     }
     free_alloc_gpr(reg_s);
     free_alloc_gpr(reg_t);
