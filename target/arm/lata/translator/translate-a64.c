@@ -19917,7 +19917,7 @@ static void handle_2misc_pairwise(DisasContext* s, int opcode, bool u,
                     return;
             }
         }
-        free_alloc_gpr(vtemp);
+        free_alloc_fpr(vtemp);
     } else {
         vreg_d = alloc_fpr_dst(rd);
         if (u) { // UADDLP
