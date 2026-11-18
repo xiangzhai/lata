@@ -85,9 +85,9 @@ distclean-tcg: $(DISTCLEAN_TCG_TARGET_RULES)
 
 # Real-application smoke gate.  These binaries and the AArch64 sysroot are
 # external, so the target skips unless LATA_APP_GATE_REQUIRE=1 is set.
-LATA_SYSROOT ?= $(HOME)/linux-aarch64
+LATA_SYSROOT ?= /usr/gnemul/lata-aarch64
 LATA_CODEX ?= $(HOME)/codex-aarch64-unknown-linux-musl
-LATA_CLAUDE ?= $(HOME)/linux-aarch64/bin/claude
+LATA_CLAUDE ?= /usr/gnemul/lata-aarch64/bin/claude
 
 .PHONY: check-lata-apps
 check-lata-apps:

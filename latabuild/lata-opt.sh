@@ -41,7 +41,7 @@ package() {
 	mkdir -p $pkgdir/$pkgname-$pkgver/usr/{bin,lib/binfmt.d,lib/sysctl.d}
 	install -Dm755 -s $srcdir/build_aarch64/lata-aarch64 $pkgdir/$pkgname-$pkgver/usr/bin/lata-aarch64
 	cat >${pkgdir}/${pkgname}-${pkgver}/usr/lib/binfmt.d/lata-aarch64.conf <<EOF
-:lata-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/lata-aarch64:
+:lata-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/lata-aarch64:POCF
 EOF
 	echo "vm.mmap_min_addr = 65536" >${pkgdir}/$pkgname-$pkgver/usr/lib/sysctl.d/mmap_min_addr.conf
 	(

@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 DEFAULT_PREFIXES = [
+    Path("/usr/gnemul/lata-aarch64"),
     Path("/usr/gnemul/qemu-aarch64"),
     Path("/usr/aarch64-linux-gnu"),
     Path("/opt/aarch64-rootfs"),

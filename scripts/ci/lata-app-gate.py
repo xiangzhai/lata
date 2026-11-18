@@ -29,6 +29,7 @@ import time
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))
+DEFAULT_SYSROOT = "/usr/gnemul/lata-aarch64"
 
 
 def expand(path):
@@ -38,6 +39,66 @@ def expand(path):
 def skip(msg):
     print("SKIP: " + msg)
     return 0 if os.environ.get("LATA_APP_GATE_REQUIRE") != "1" else 1
+
+
+def check_binfmt_packaging():
+    """Guard the packaged handler's argv[0] preservation.
+
+    codex re-executes itself through the codex-linux-sandbox symlink and
+    dispatches on argv[0].  binfmt_misc without the P flag drops the original
+    argv[0], so the helper starts as the normal codex CLI and every sandboxed
+    shell command fails.  Keep the packaged entry on POCF.
+    """
+    path = os.path.join(REPO_ROOT, "latabuild", "lata-opt.sh")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError as exc:
+        print("FAIL: cannot read %s: %s" % (path, exc))
+        return 1
+
+    entry = None
+    for line in lines:
+        line = line.strip()
+        if line.startswith(":lata-aarch64:M::"):
+            entry = line
+            break
+    if entry is None:
+        print("FAIL: latabuild/lata-opt.sh has no aarch64 binfmt entry")
+        return 1
+
+    fields = entry.split(":")
+    flags = fields[-1] if len(fields) >= 8 else ""
+    if "P" not in flags:
+        print("FAIL: packaged binfmt entry does not preserve argv[0]: %s" %
+              entry)
+        return 1
+    print("ok: binfmt packaging preserves argv[0]")
+    return 0
+
+
+def check_default_ld_prefix(args):
+    """Guard the built-in -L default used by binfmt_misc execution.
+
+    Directly executing an AArch64 binary through binfmt_misc cannot pass
+    -L, so the sysroot must already be the built-in interpreter prefix.
+    """
+    if not os.path.isfile(args.qemu):
+        return skip("LATA qemu binary not found: %s" % args.qemu)
+    try:
+        proc = subprocess.run([args.qemu, "--help"], text=True,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print("FAIL: cannot query %s: %s" % (args.qemu, exc))
+        return 1
+    m = re.search(r"QEMU_LD_PREFIX\s*=\s*(\S+)", proc.stdout)
+    if not m or m.group(1) != DEFAULT_SYSROOT:
+        print("FAIL: default QEMU_LD_PREFIX is %s, expected %s" %
+              (m.group(1) if m else "<missing>", DEFAULT_SYSROOT))
+        return 1
+    print("ok: default -L prefix is %s" % DEFAULT_SYSROOT)
+    return 0
 
 
 def check_prereqs(args):
@@ -229,10 +290,10 @@ def run_claude_tui(args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--qemu", default="lata-aarch64")
-    parser.add_argument("--sysroot", default="~/linux-aarch64")
+    parser.add_argument("--sysroot", default=DEFAULT_SYSROOT)
     parser.add_argument("--codex",
                         default="~/codex-aarch64-unknown-linux-musl")
-    parser.add_argument("--claude", default="~/linux-aarch64/bin/claude")
+    parser.add_argument("--claude", default="/usr/gnemul/lata-aarch64/bin/claude")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--startup-timeout", type=float, default=45.0)
     parser.add_argument("--input-timeout", type=float, default=30.0)
@@ -244,6 +305,14 @@ def main():
     args.sysroot = expand(args.sysroot)
     args.codex = expand(args.codex)
     args.claude = expand(args.claude)
+
+    rc = check_binfmt_packaging()
+    if rc != 0:
+        return rc
+
+    rc = check_default_ld_prefix(args)
+    if rc != 0:
+        return rc
 
     rc = check_prereqs(args)
     if rc is not None:

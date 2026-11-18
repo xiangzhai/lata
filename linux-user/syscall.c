@@ -133,6 +133,7 @@
 #include "user-internals.h"
 #include "strace.h"
 #include "signal-common.h"
+#include "guest-seccomp.h"
 #include "loader.h"
 #include "user-mmap.h"
 #include "user/safe-syscall.h"
@@ -6692,13 +6693,15 @@ static abi_long do_prctl(CPUArchState *env, abi_long option, abi_long arg2,
         /* Was used for SPE on PowerPC. */
         return -TARGET_EINVAL;
 
+    case PR_GET_SECCOMP:
+    case PR_SET_SECCOMP:
+        return guest_seccomp_prctl(env, option, arg2, arg3);
+
     case PR_GET_ENDIAN:
     case PR_SET_ENDIAN:
     case PR_GET_FPEMU:
     case PR_SET_FPEMU:
     case PR_SET_MM:
-    case PR_GET_SECCOMP:
-    case PR_SET_SECCOMP:
     case PR_SET_SYSCALL_USER_DISPATCH:
     case PR_GET_THP_DISABLE:
     case PR_SET_THP_DISABLE:
@@ -6817,10 +6820,11 @@ static int do_fork(CPUArchState *env, unsigned int flags, abi_ulong newsp,
         cpu_clone_regs_child(new_env, newsp, flags);
         cpu_clone_regs_parent(env, flags);
         new_cpu = env_cpu(new_env);
-        new_cpu->opaque = ts;
         ts->bprm = parent_ts->bprm;
         ts->info = parent_ts->info;
         ts->signal_mask = parent_ts->signal_mask;
+        ts->seccomp_filter = guest_seccomp_filter_ref(parent_ts->seccomp_filter);
+        new_cpu->opaque = ts;
 
         if (flags & CLONE_CHILD_CLEARTID) {
             ts->child_tidptr = child_tidptr;
@@ -9513,6 +9517,7 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
             pthread_mutex_unlock(&clone_lock);
 
             thread_cpu = NULL;
+            guest_seccomp_filter_unref(ts->seccomp_filter);
             g_free(ts);
             rcu_unregister_thread();
             pthread_exit(NULL);
@@ -9525,6 +9530,10 @@ static abi_long do_syscall1(CPUArchState *cpu_env, int num, abi_long arg1,
         preexit_cleanup(cpu_env, arg1);
         _exit(arg1);
         return 0; /* avoid warning */
+#ifdef TARGET_NR_seccomp
+    case TARGET_NR_seccomp:
+        return guest_seccomp_syscall(cpu_env, arg1, arg2, arg3);
+#endif
     case TARGET_NR_read:
         if (arg2 == 0 && arg3 == 0) {
             return get_errno(safe_read(arg1, 0, 0));
@@ -14169,8 +14178,33 @@ abi_long do_syscall(CPUArchState *cpu_env, int num, abi_long arg1,
         print_syscall(cpu_env, num, arg1, arg2, arg3, arg4, arg5, arg6);
     }
 
-    ret = do_syscall1(cpu_env, num, arg1, arg2, arg3, arg4,
-                      arg5, arg6, arg7, arg8);
+    {
+        const abi_long seccomp_args[6] = {
+            arg1, arg2, arg3, arg4, arg5, arg6,
+        };
+        GuestSeccompAction seccomp_action = guest_seccomp_filter_syscall(
+            cpu_env, num, guest_seccomp_target_arch(), seccomp_args, &ret);
+
+        switch (seccomp_action) {
+        case GUEST_SECCOMP_CONTINUE:
+            ret = do_syscall1(cpu_env, num, arg1, arg2, arg3, arg4,
+                              arg5, arg6, arg7, arg8);
+            break;
+        case GUEST_SECCOMP_RETURN:
+        case GUEST_SECCOMP_RETURN_ERRNO:
+            break;
+        case GUEST_SECCOMP_TRACE:
+            ret = -TARGET_ENOSYS;
+            break;
+        case GUEST_SECCOMP_KILL_THREAD:
+        case GUEST_SECCOMP_KILL_PROCESS:
+            force_sig(TARGET_SIGSYS);
+            ret = 0;
+            break;
+        default:
+            g_assert_not_reached();
+        }
+    }
 
     if (unlikely(qemu_loglevel_mask(LOG_STRACE))) {
         print_syscall_ret(cpu_env, num, ret, arg1, arg2,

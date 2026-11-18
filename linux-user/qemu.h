@@ -97,6 +97,8 @@ struct emulated_sigtable {
     target_siginfo_t info;
 };
 
+struct GuestSeccompFilter;
+
 typedef struct TaskState {
     pid_t ts_tid;     /* tid (or pid) of this task */
 #ifdef TARGET_ARM
@@ -116,6 +118,8 @@ typedef struct TaskState {
     uint32_t v86mask;
 #endif
     abi_ulong child_tidptr;
+    /* Immutable seccomp filter chain inherited by guest threads. */
+    struct GuestSeccompFilter *seccomp_filter;
 #ifdef TARGET_M68K
     abi_ulong tp_value;
 #endif
