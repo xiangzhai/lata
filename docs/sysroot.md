@@ -4,7 +4,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| sysroot 路径 | `/home/zhaixiang/linux-aarch64` |
+| sysroot 路径 | `/usr/gnemul/lata-aarch64` |
 | 目标系统 | AOSC OS 14.0.1, `arm64` (AArch64) |
 | 宿主系统 | AOSC OS 14.0.1, `loongarch64` |
 | 软件源 | `https://repo.aosc.io/anthon/debs stable main`（实际重定向到 `mirrors.jlu.edu.cn`） |
@@ -12,7 +12,7 @@
 | sysroot 大小 | 约 2.3 GiB |
 | APT 缓存大小 | 约 581 MiB |
 | 关键组件 | glibc 1:2.44-1, gcc 1:16.2.0, binutils 2.47-7, linux+api 2:6.18.35, bash 5.2.37-2, dpkg 1.23.5-3, apt 2:3.2.1 |
-| 包清单 | `/home/zhaixiang/linux-aarch64/sysroot-packages.txt` |
+| 包清单 | `/usr/gnemul/lata-aarch64/sysroot-packages.txt` |
 
 整个制作过程**没有使用 root / sudo**：APT 只用于解析依赖和下载 `.deb`，随后用 `dpkg-deb -x` 解包到用户目录。
 
@@ -89,7 +89,7 @@ $WORK/var/cache/apt/archives/
 ## 4. 解包到 sysroot
 
 ```bash
-ROOT=/home/zhaixiang/linux-aarch64
+ROOT=/usr/gnemul/lata-aarch64
 CACHE="$WORK/var/cache/apt/archives"
 mkdir -p "$ROOT"
 ```
@@ -302,7 +302,7 @@ VERSION_ID="14.0.1"
 ```bash
 cd /mnt/zhaixiang/lata
 QEMU=./build_aarch64/lata-aarch64
-ROOT=$HOME/linux-aarch64
+ROOT=/usr/gnemul/lata-aarch64
 
 "$QEMU" -L "$ROOT" "$ROOT/bin/<prog>" [args]
 ```
@@ -339,21 +339,21 @@ printf 'alpha\nbeta\ngamma\n' | "$QEMU" -L "$ROOT" "$ROOT/bin/grep" 'a$'
 ## 使用方式
 
 ```bash
-export QEMU_LD_PREFIX=/home/zhaixiang/linux-aarch64
-/path/to/qemu-aarch64 /home/zhaixiang/linux-aarch64/usr/bin/bash
+export QEMU_LD_PREFIX=/usr/gnemul/lata-aarch64
+/path/to/qemu-aarch64 /usr/gnemul/lata-aarch64/usr/bin/bash
 ```
 
 或显式传 `-L`：
 
 ```bash
-qemu-aarch64 -L /home/zhaixiang/linux-aarch64 \
-  /home/zhaixiang/linux-aarch64/usr/bin/程序
+qemu-aarch64 -L /usr/gnemul/lata-aarch64 \
+  /usr/gnemul/lata-aarch64/usr/bin/程序
 ```
 
 交叉编译时，把该目录作为 `--sysroot`：
 
 ```bash
-aarch64-...-gcc --sysroot=/home/zhaixiang/linux-aarch64 ...
+aarch64-...-gcc --sysroot=/usr/gnemul/lata-aarch64 ...
 ```
 
 ## 注意事项 / 限制
