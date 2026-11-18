@@ -71,6 +71,8 @@
 
 char *exec_path;
 char real_exec_path[PATH_MAX];
+char **qemu_guest_exec_argv;
+int qemu_guest_exec_argc;
 
 static bool opt_one_insn_per_tb;
 static const char *argv0;
@@ -884,6 +886,14 @@ int main(int argc, char **argv, char **envp)
 #endif
 
     optind = parse_args(argc, argv);
+
+    /*
+     * Keep the QEMU command line around so that a guest execve() of a
+     * target ELF file can re-exec QEMU instead of relying on a host
+     * binfmt_misc handler for the target architecture.
+     */
+    qemu_guest_exec_argc = optind;
+    qemu_guest_exec_argv = argv;
 
     qemu_set_log_filename_flags(last_log_filename,
                                 last_log_mask | (enable_strace * LOG_STRACE),

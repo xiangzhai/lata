@@ -8774,6 +8774,83 @@ ssize_t do_guest_readlink(const char *pathname, char *buf, size_t bufsiz)
     return ret;
 }
 
+#if defined(TARGET_AARCH64)
+/*
+ * Return true if @filename is a regular executable ELF image for the
+ * target architecture.  Only those can be handed to a re-executed QEMU;
+ * scripts, host binaries and foreign ELF images keep the historical
+ * host execve() behaviour.
+ */
+static bool is_target_exec_elf(const char *filename)
+{
+    struct stat st;
+    Elf64_Ehdr ehdr;
+    ssize_t len;
+    int fd;
+
+    fd = open(filename, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
+        !(st.st_mode & 0111)) {
+        close(fd);
+        return false;
+    }
+    len = read(fd, &ehdr, sizeof(ehdr));
+    close(fd);
+    if (len != sizeof(ehdr) || memcmp(ehdr.e_ident, ELFMAG, SELFMAG) != 0 ||
+        ehdr.e_ident[EI_CLASS] != ELFCLASS64 ||
+        ehdr.e_ident[EI_DATA] != ELFDATA2LSB) {
+        return false;
+    }
+    return ehdr.e_machine == EM_AARCH64;
+}
+
+/*
+ * QEMU user-mode normally relies on a host binfmt_misc handler to run a
+ * guest binary from execve().  When there is no handler for the target
+ * architecture the host execve() fails with ENOEXEC, which breaks programs
+ * that re-execute themselves or their own helpers (for example codex's
+ * codex-linux-sandbox symlink).  Re-exec QEMU itself instead, forwarding
+ * the original QEMU options, the guest argv and the guest environment.
+ */
+static int guest_exec_reexec(const char *exe, char **argp, char **envp)
+{
+    int guest_argc = 0;
+    int n, i, j;
+    char **newargv;
+    int ret;
+
+    while (argp && argp[guest_argc]) {
+        guest_argc++;
+    }
+
+    n = qemu_guest_exec_argc + 2 + 1 + 1;
+    if (guest_argc > 1) {
+        n += guest_argc - 1;
+    }
+    newargv = g_new0(char *, n);
+
+    i = 0;
+    newargv[i++] = (char *)"/proc/self/exe";
+    for (j = 1; j < qemu_guest_exec_argc; j++) {
+        newargv[i++] = qemu_guest_exec_argv[j];
+    }
+    newargv[i++] = (char *)"-0";
+    newargv[i++] = (guest_argc > 0 && argp[0]) ? argp[0] : (char *)exe;
+    newargv[i++] = (char *)exe;
+    for (j = 1; j < guest_argc; j++) {
+        newargv[i++] = argp[j];
+    }
+    newargv[i] = NULL;
+
+    ret = get_errno(safe_execve("/proc/self/exe", newargv, envp));
+    g_free(newargv);
+    return ret;
+}
+#endif
+
 static int do_execv(CPUArchState *cpu_env, int dirfd,
                     abi_long pathname, abi_long guest_argp,
                     abi_long guest_envp, int flags, bool is_execveat)
@@ -8859,6 +8936,17 @@ static int do_execv(CPUArchState *cpu_env, int dirfd,
     if (is_proc_myself(p, "exe")) {
         exe = exec_path;
     }
+#if defined(TARGET_AARCH64)
+    if (!is_execveat) {
+        const char *host_exe = path(exe);
+
+        if (is_target_exec_elf(host_exe)) {
+            ret = guest_exec_reexec(host_exe, argp, envp);
+            unlock_user(p, pathname, 0);
+            goto execve_end;
+        }
+    }
+#endif
     ret = is_execveat
         ? safe_execveat(dirfd, exe, argp, envp, flags)
         : safe_execve(exe, argp, envp);

@@ -24,6 +24,8 @@
 #include "qemu/log.h"
 
 extern char *exec_path;
+extern char **qemu_guest_exec_argv;
+extern int qemu_guest_exec_argc;
 void init_task_state(TaskState *ts);
 void task_settid(TaskState *);
 void stop_all_tasks(void);
