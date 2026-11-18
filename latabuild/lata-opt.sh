@@ -33,15 +33,20 @@ build() {
 
 	pushd $srcdir/build_aarch64 >/dev/null
 	../configure "${_configure64_flags[@]}"
-	ninja -j$(nproc)
+	ninja -j$(nproc) lata-aarch64 tools/lata-darwin
 	popd >/dev/null
 }
 
 package() {
 	mkdir -p $pkgdir/$pkgname-$pkgver/usr/{bin,lib/binfmt.d,lib/sysctl.d}
 	install -Dm755 -s $srcdir/build_aarch64/lata-aarch64 $pkgdir/$pkgname-$pkgver/usr/bin/lata-aarch64
+	install -Dm755 -s $srcdir/build_aarch64/tools/lata-darwin $pkgdir/$pkgname-$pkgver/usr/bin/lata-darwin
 	cat >${pkgdir}/${pkgname}-${pkgver}/usr/lib/binfmt.d/lata-aarch64.conf <<EOF
 :lata-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/lata-aarch64:POCF
+EOF
+	cat >${pkgdir}/${pkgname}-${pkgver}/usr/lib/binfmt.d/lata-darwin-aarch64.conf <<EOF
+:lata-darwin-aarch64:M::\xcf\xfa\xed\xfe:\xff\xff\xff\xff:/usr/bin/lata-darwin:POCF
+:lata-darwin-fat:M::\xca\xfe\xba\xbe:\xff\xff\xff\xff:/usr/bin/lata-darwin:POCF
 EOF
 	echo "vm.mmap_min_addr = 65536" >${pkgdir}/$pkgname-$pkgver/usr/lib/sysctl.d/mmap_min_addr.conf
 	(

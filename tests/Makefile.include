@@ -88,6 +88,9 @@ distclean-tcg: $(DISTCLEAN_TCG_TARGET_RULES)
 LATA_SYSROOT ?= /usr/gnemul/lata-aarch64
 LATA_CODEX ?= $(HOME)/codex-aarch64-unknown-linux-musl
 LATA_CLAUDE ?= /usr/gnemul/lata-aarch64/bin/claude
+LATA_CODEX_DARWIN ?= $(HOME)/codex-aarch64-apple-darwin
+LATA_DARLING_ROOT ?=
+LATA_DARWIN ?= $(BUILD_DIR)/tools/lata-darwin
 
 .PHONY: check-lata-apps
 check-lata-apps:
@@ -96,7 +99,10 @@ check-lata-apps:
 	        --qemu $(BUILD_DIR)/lata-aarch64 \
 	        --sysroot "$(LATA_SYSROOT)" \
 	        --codex "$(LATA_CODEX)" \
-	        --claude "$(LATA_CLAUDE)", \
+	        --claude "$(LATA_CLAUDE)" \
+	        --codex-darwin "$(LATA_CODEX_DARWIN)" \
+	        --darling-root "$(LATA_DARLING_ROOT)" \
+	        --lata-darwin "$(LATA_DARWIN)", \
 	    "GATE", "LATA codex/claude")
 
 # Opt-in CI gate: set LATA_APP_GATE=1 to make "make check" enforce it.
